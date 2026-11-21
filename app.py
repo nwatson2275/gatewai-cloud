@@ -231,6 +231,40 @@ CORE_SCHEMA = {
 
 # --- NEW GLOBAL DEFINITION ---
 GLOBAL_CORE = ["SI_Identity", "SI_User_Profile", "SI_Observed_Profile"]
+
+def apply_gatewai_seed_si_identity():
+    """One-shot: copy SI_Identity from GATEWAI_SEED_SI_IDENTITY into System/system.db."""
+    seed = os.environ.get("GATEWAI_SEED_SI_IDENTITY", "")
+    if seed is None:
+        return
+    seed = str(seed)
+    if not seed.strip():
+        return
+    try:
+        sys_db = db.get_system_db_path(BASE_SYSTEM_DIR)
+        db.init_db(sys_db)
+        db.migrate_db(sys_db)
+        db.save_slot(
+            "",
+            sys_db,
+            "SI_Identity",
+            seed,
+            "core",
+            "System Core File",
+            "global",
+            "system",
+            False,
+            False,
+            False,
+        )
+        marker = os.path.join(BASE_SYSTEM_DIR, ".si_identity_seeded")
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(datetime.now().isoformat(timespec="seconds") + "\n")
+        print(f"DEBUG: Seeded SI_Identity ({len(seed)} chars) from GATEWAI_SEED_SI_IDENTITY")
+    except Exception as e:
+        print(f"ERROR seeding SI_Identity: {e}")
+
+apply_gatewai_seed_si_identity()
 # --- END NEW GLOBAL DEFINITION ---
 
 def normalize_folder_name(folder):
@@ -3125,9 +3159,12 @@ with st.expander("📂 Project Manager", expanded=False):
         key="project_import_apply_globals",
     )
     if st.button("⬆️ Import zip", use_container_width=True, key="project_import_btn"):
+        resolved_import_name = str(import_name or "").strip()
+        if not resolved_import_name and uploaded_zip is not None:
+            resolved_import_name = os.path.splitext(uploaded_zip.name)[0].replace(".gatewai", "").strip()
         if uploaded_zip is None:
             st.warning("Choose a zip file first.")
-        elif not str(import_name).strip():
+        elif not resolved_import_name:
             st.warning("Enter a project name for the import.")
         else:
             try:
@@ -3138,7 +3175,7 @@ with st.expander("📂 Project Manager", expanded=False):
                     )
                 result = import_project_zip_bytes(
                     raw,
-                    import_name,
+                    resolved_import_name,
                     overwrite=import_overwrite,
                     apply_system_globals=import_apply_globals,
                 )
