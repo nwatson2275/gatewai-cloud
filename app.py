@@ -68,6 +68,52 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Data root must exist before the password gate so one-shot seeds can run on cold start.
+GATEWAI_DATA_DIR = os.environ.get("GATEWAI_DATA_DIR", "").strip() or "."
+BASE_PROJECT_DIR = os.path.join(GATEWAI_DATA_DIR, "Projects")
+BASE_SYSTEM_DIR = os.path.join(GATEWAI_DATA_DIR, "System")
+DOMAINS_DIR = os.path.join(BASE_SYSTEM_DIR, "Domains")
+if not os.path.exists(BASE_PROJECT_DIR):
+    os.makedirs(BASE_PROJECT_DIR)
+if not os.path.exists(BASE_SYSTEM_DIR):
+    os.makedirs(BASE_SYSTEM_DIR)
+if not os.path.exists(DOMAINS_DIR):
+    os.makedirs(DOMAINS_DIR)
+
+def apply_gatewai_seed_si_identity():
+    """One-shot: copy SI_Identity from GATEWAI_SEED_SI_IDENTITY into System/system.db."""
+    seed = os.environ.get("GATEWAI_SEED_SI_IDENTITY", "")
+    if seed is None:
+        return
+    seed = str(seed)
+    if not seed.strip():
+        return
+    try:
+        sys_db = db.get_system_db_path(BASE_SYSTEM_DIR)
+        db.init_db(sys_db)
+        db.migrate_db(sys_db)
+        db.save_slot(
+            "",
+            sys_db,
+            "SI_Identity",
+            seed,
+            "core",
+            "System Core File",
+            "global",
+            "system",
+            False,
+            False,
+            False,
+        )
+        marker = os.path.join(BASE_SYSTEM_DIR, ".si_identity_seeded")
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(datetime.now().isoformat(timespec="seconds") + "\n")
+        print(f"DEBUG: Seeded SI_Identity ({len(seed)} chars) from GATEWAI_SEED_SI_IDENTITY")
+    except Exception as e:
+        print(f"ERROR seeding SI_Identity: {e}")
+
+apply_gatewai_seed_si_identity()
+
 # Cloud gate: when GATEWAI_PASSWORD is set (Render), require it once per session.
 # Desktop without the env var stays open.
 _GATEWAI_PASSWORD = os.environ.get("GATEWAI_PASSWORD", "").strip()
@@ -173,14 +219,7 @@ st.markdown(
 # --- 2. FILE SYSTEM ARCHITECTURE (PHASE 2) ---
 # Local default: ./Projects and ./System. On Render set GATEWAI_DATA_DIR=/var/data
 # so a persistent disk keeps projects across deploys.
-GATEWAI_DATA_DIR = os.environ.get("GATEWAI_DATA_DIR", "").strip() or "."
-BASE_PROJECT_DIR = os.path.join(GATEWAI_DATA_DIR, "Projects")
-BASE_SYSTEM_DIR = os.path.join(GATEWAI_DATA_DIR, "System")
-DOMAINS_DIR = os.path.join(BASE_SYSTEM_DIR, "Domains")
-
-if not os.path.exists(BASE_PROJECT_DIR): os.makedirs(BASE_PROJECT_DIR)
-if not os.path.exists(BASE_SYSTEM_DIR): os.makedirs(BASE_SYSTEM_DIR)
-if not os.path.exists(DOMAINS_DIR): os.makedirs(DOMAINS_DIR)
+# GATEWAI_DATA_DIR / BASE_* / DOMAINS_DIR are initialized before the password gate.
 
 # Initialize Global Profile
 #global_profile_path = os.path.join(BASE_SYSTEM_DIR, "global_profile.txt")
@@ -231,40 +270,7 @@ CORE_SCHEMA = {
 
 # --- NEW GLOBAL DEFINITION ---
 GLOBAL_CORE = ["SI_Identity", "SI_User_Profile", "SI_Observed_Profile"]
-
-def apply_gatewai_seed_si_identity():
-    """One-shot: copy SI_Identity from GATEWAI_SEED_SI_IDENTITY into System/system.db."""
-    seed = os.environ.get("GATEWAI_SEED_SI_IDENTITY", "")
-    if seed is None:
-        return
-    seed = str(seed)
-    if not seed.strip():
-        return
-    try:
-        sys_db = db.get_system_db_path(BASE_SYSTEM_DIR)
-        db.init_db(sys_db)
-        db.migrate_db(sys_db)
-        db.save_slot(
-            "",
-            sys_db,
-            "SI_Identity",
-            seed,
-            "core",
-            "System Core File",
-            "global",
-            "system",
-            False,
-            False,
-            False,
-        )
-        marker = os.path.join(BASE_SYSTEM_DIR, ".si_identity_seeded")
-        with open(marker, "w", encoding="utf-8") as f:
-            f.write(datetime.now().isoformat(timespec="seconds") + "\n")
-        print(f"DEBUG: Seeded SI_Identity ({len(seed)} chars) from GATEWAI_SEED_SI_IDENTITY")
-    except Exception as e:
-        print(f"ERROR seeding SI_Identity: {e}")
-
-apply_gatewai_seed_si_identity()
+# SI_Identity seed runs before the password gate (see apply_gatewai_seed_si_identity above).
 # --- END NEW GLOBAL DEFINITION ---
 
 def normalize_folder_name(folder):
