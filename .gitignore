@@ -1,0 +1,33 @@
+# Local vault data — never push project content or SQLite
+Projects/
+System/**/*.db
+System/last_session.json
+**/pending_updates.json
+
+# Secrets
+.streamlit/secrets.toml
+.env
+.env.*
+
+# Python / tooling
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.envrc
+
+# Temp / backups
+_tmp_*.py
+*.bak
+*.corrupted_bak
+.DS_Store
+Thumbs.db
+
+# Editor / local copies
+app - Copy*.py
+*.gatewai.zip
+.vs/
+*.code-workspace
+~$*
+*.docx
