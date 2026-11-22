@@ -747,8 +747,23 @@ def write_pending_updates(name, updates):
             json.dump(updates, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
+    except Exception as e:
+        print(f"ERROR: write_pending_updates failed for {name}: {e}")
+
+
+def persist_pending_updates_now():
+    """Flush Staging Area to disk immediately (before rerun / mobile disconnect)."""
+    project = st.session_state.get("active_project")
+    pending = st.session_state.get("pending_updates") or {}
+    if not isinstance(pending, dict):
+        pending = {}
+    write_pending_updates(project, pending)
+    try:
+        st.session_state._pending_updates_snapshot = json.dumps(
+            pending, sort_keys=True, default=str
+        )
     except Exception:
-        pass
+        st.session_state._pending_updates_snapshot = ""
 
 ENGINE_ROOM_FIELDS = (
     ("chat_engine_set", "chat_engine"),
@@ -2486,6 +2501,12 @@ def run_auto_shadow_turn(temp_val=None, top_p_val=None):
                     )
         else:
             shadow_logs.append("💤 No updates required.")
+        if any_staged:
+            # Must hit disk before any st.rerun(); mobile reconnects often drop session.
+            persist_pending_updates_now()
+            shadow_logs.append(
+                f"💾 Persisted {len(st.session_state.get('pending_updates') or {})} staged proposal(s) to disk."
+            )
         return shadow_logs, any_staged, True
     except Exception as e:
         err_msg = str(e)
@@ -4305,6 +4326,7 @@ with st.sidebar:
                                         st.session_state.shadow_logs_manual_run.append(f"💤 Shadow (Manual): '{k}': Not AI-managed, Review Mode OFF, and not suspect. Shadow took no action.")
 
                                 if any_staged:
+                                    persist_pending_updates_now()
                                     st.success("Shadow run complete. Proposed updates are in the Staging Area.")
                                     should_rerun_after_shadow = True # NEW: Set flag to rerun if updates are staged
                                 else:
