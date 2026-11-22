@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import asynccontextmanager
 from typing import Optional
 from urllib.parse import parse_qs
 
@@ -387,9 +388,17 @@ routes = [
     ),
 ]
 
+@asynccontextmanager
+async def lifespan(_app: Starlette):
+    await on_startup()
+    try:
+        yield
+    finally:
+        await on_shutdown()
+
+
 app = Starlette(
     debug=False,
     routes=routes,
-    on_startup=[on_startup],
-    on_shutdown=[on_shutdown],
+    lifespan=lifespan,
 )
