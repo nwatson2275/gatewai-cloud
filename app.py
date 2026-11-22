@@ -2324,6 +2324,182 @@ def resolve_shadow_target(name, valid_targets):
         return folded[key[:-3]]
     return None
 
+def mark_auto_shadow_complete():
+    """Record that auto-shadow has caught up through the current chat length."""
+    st.session_state.pending_auto_shadow = False
+    st.session_state.last_auto_shadow_at_msg_count = len(st.session_state.get("messages") or [])
+
+
+def needs_auto_shadow_catchup():
+    """True when chat already saved a model reply but auto-shadow never finished.
+
+    Common on mobile: the request dies after save_project_state and before/during
+    the shadow pass; answered_already then blocks a chat retry.
+    """
+    if not st.session_state.get("auto_shadow_active", True):
+        return False
+    if st.session_state.get("harvest_in_progress", False):
+        return False
+    messages = st.session_state.get("messages") or []
+    if not messages:
+        return False
+    last = messages[-1]
+    if not (isinstance(last, dict) and last.get("role") == "model"):
+        return False
+    if st.session_state.get("pending_auto_shadow"):
+        return True
+    last_n = int(st.session_state.get("last_auto_shadow_at_msg_count") or 0)
+    return len(messages) > last_n
+
+
+def run_auto_shadow_turn(temp_val=None, top_p_val=None):
+    """Run one gated auto-shadow pass. Returns (logs, any_staged, completed).
+
+    completed=True means we should not retry for this message count (ran or
+    intentionally skipped because Auto Shadow is off). Deferrals keep completed=False.
+    """
+    shadow_logs = []
+    any_staged = False
+    if not st.session_state.get("auto_shadow_active", True):
+        shadow_logs.append("⏸️ Skipped: Auto Shadow is off. Use Run Shadow Now when you want a pass.")
+        return shadow_logs, False, True
+    if st.session_state.get("pending_updates") and len(st.session_state.pending_updates) > 0:
+        shadow_logs.append("⏳ Skipped: Pending updates exist. Shadow deferring until Staging Area is clear.")
+        return shadow_logs, False, False
+    if st.session_state.get("harvest_in_progress", False):
+        shadow_logs.append("⏳ Skipped: Harvest In Progress.")
+        return shadow_logs, False, False
+
+    try:
+        shadow_logs = ["🕵️ Shadow: Starting Loop..."]
+        current_state_dict = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
+        if "loaded_slots_metadata" in st.session_state:
+            for k, meta in st.session_state.loaded_slots_metadata.items():
+                if meta.get("slot_type") == "user":
+                    current_state_dict[k] = st.session_state.get(k, "")
+
+        last_harvest_idx = st.session_state.get("last_harvest_message_index", 0)
+        history_delta = st.session_state.messages[last_harvest_idx:]
+        recent_history = [m for m in history_delta if "**🕵️ SHADOW LOGS**" not in m["content"]]
+        s_eng = st.session_state.get("shadow_engine_set", "gemini-2.5-flash-lite")
+        if temp_val is None:
+            temp_val = st.session_state.get("temp_val", 0.7)
+        if top_p_val is None:
+            top_p_val = st.session_state.get("top_p_val", 0.9)
+
+        st.session_state.role_stats["shadow"] += 1
+        updates, logs_str = run_shadow_dispatcher(
+            recent_history,
+            current_state_dict,
+            st.session_state.loaded_slots_metadata,
+            st.session_state.domain_content,
+            st.session_state.gemini_api_key,
+            temp_val,
+            top_p_val,
+            s_eng,
+        )
+        shadow_logs.append(logs_str)
+
+        if updates:
+            is_review_active = st.session_state.get("review_mode_active", True)
+            for k, update_data in updates.items():
+                v_str = update_data["content"]
+                is_suspect_from_shadow = update_data.get("suspect", False)
+                current_val = st.session_state.get(k, "")
+                is_different = False
+
+                if isinstance(v_str, (dict, list)):
+                    v_str_norm = json.dumps(v_str, indent=2)
+                else:
+                    v_str_norm = str(v_str)
+
+                try:
+                    obj_new = json.loads(v_str_norm)
+                    obj_curr = json.loads(str(current_val))
+                    if obj_new != obj_curr:
+                        is_different = True
+                except Exception:
+                    clean_v = v_str_norm.strip()
+                    if clean_v.startswith("---"):
+                        clean_v = clean_v[3:].lstrip()
+                    if clean_v.endswith("---"):
+                        clean_v = clean_v[:-3].rstrip()
+                    clean_current = str(current_val).strip()
+                    if clean_current.startswith("---"):
+                        clean_current = clean_current[3:].lstrip()
+                    if clean_current.endswith("---"):
+                        clean_current = clean_current[:-3].rstrip()
+                    if clean_v != clean_current:
+                        is_different = True
+
+                if not is_different:
+                    shadow_logs.append(f"💤 {k}: Content identical, skipping update.")
+                    continue
+
+                ai_managed = st.session_state.loaded_slots_metadata.get(k, {}).get("ai_managed", False)
+                current_val_for_audit = st.session_state.get(k, "")
+                if ai_managed and not shadow_preserves_existing(current_val_for_audit, v_str):
+                    shadow_logs.append(
+                        f"🛑 {k}: Discarded Shadow rewrite that would revert the current file."
+                    )
+                    continue
+
+                if is_review_active or is_suspect_from_shadow:
+                    if "pending_updates" not in st.session_state:
+                        st.session_state.pending_updates = {}
+                    st.session_state.pending_updates[k] = {
+                        "content": v_str,
+                        "suspect": is_suspect_from_shadow,
+                    }
+                    shadow_logs.append(
+                        f"📝 STAGED: {k} queued for review (Review Mode ON or Suspect)."
+                    )
+                    st.toast(f"Shadow proposed update to {k}")
+                    any_staged = True
+                elif not is_review_active and ai_managed and not is_suspect_from_shadow:
+                    proj_db = db.get_project_db_path(BASE_PROJECT_DIR, st.session_state.active_project)
+                    sys_db = db.get_system_db_path(BASE_SYSTEM_DIR)
+                    meta = st.session_state.loaded_slots_metadata.get(k, {})
+                    edit_summary = "AI-generated edit (Shadow auto-commit)"
+                    db.save_slot(
+                        proj_db,
+                        sys_db,
+                        k,
+                        v_str,
+                        meta.get("slot_type", "user"),
+                        meta.get("description", ""),
+                        meta.get("scope", "project"),
+                        meta.get("owner_id", "system"),
+                        meta.get("is_distributed", False),
+                        meta.get("part_of_dtn", False),
+                        ai_managed=True,
+                        old_content=current_val_for_audit,
+                        edit_summary=edit_summary,
+                    )
+                    commit_slot_text(k, v_str, replaced_text=current_val_for_audit)
+                    shadow_logs.append(
+                        f"🤖 AI-Managed AUTO-COMMIT: {k} updated directly (Review Mode OFF)."
+                    )
+                else:
+                    shadow_logs.append(
+                        f"💤 {k}: Not AI-managed, Review Mode OFF, and not suspect. Shadow took no action."
+                    )
+        else:
+            shadow_logs.append("💤 No updates required.")
+        return shadow_logs, any_staged, True
+    except Exception as e:
+        err_msg = str(e)
+        if "429" in err_msg or "ResourceExhausted" in err_msg:
+            shadow_logs.append("🚦 429 Quota Hit - Skipping Shadow.")
+            st.warning("AI rate limit reached for Shadow. Please try again in a moment.")
+        else:
+            shadow_logs.append(f"💀 CRASH (Auto Shadow): {err_msg}")
+            print(f"ERROR: Auto Shadow: {err_msg}")
+            st.warning("Shadow hit an unexpected error. It will retry on the next refresh.")
+        # Leave incomplete so catch-up can retry (except soft 429 — still retry later).
+        return shadow_logs, False, False
+
+
 def run_shadow_dispatcher(history_list, current_state, loaded_metadata, domain_context, api_key, temp, top_p, engine_name="gemini-2.5-flash-lite"):
 #    print(f"start run_shadow_dispatcher (first 200 chars): {str(history_list)[:200]}...") # Print first 200 chars
     logs = []
@@ -2734,6 +2910,9 @@ if st.session_state.loaded_project != st.session_state.active_project:
         )
     except Exception:
         st.session_state._pending_updates_snapshot = ""
+    # Baseline so opening a project does not re-shadow the whole history.
+    st.session_state.last_auto_shadow_at_msg_count = len(st.session_state.get("messages") or [])
+    st.session_state.pending_auto_shadow = False
     st.session_state.loaded_project = st.session_state.active_project
     remember_engine_room_snapshot(st.session_state.active_project)
     loaded_names = set(st.session_state.get("loaded_slots_metadata", {}).keys())
@@ -5993,6 +6172,16 @@ if answered_already:
     st.session_state.pop("held_chat_prompt", None)
     prompt = None
 
+# Catch up auto-shadow if chat saved but the prior request died mid-shadow (common on mobile).
+if not prompt and needs_auto_shadow_catchup():
+    st.session_state.pending_auto_shadow = True
+    catchup_logs, catchup_staged, catchup_done = run_auto_shadow_turn()
+    st.session_state.shadow_logs = catchup_logs
+    if catchup_done:
+        mark_auto_shadow_complete()
+    if catchup_staged:
+        st.rerun()
+
 if prompt:
 
     # Initialize local variable should_rerun
@@ -6344,157 +6533,18 @@ if prompt:
         
                     save_project_state(universal_save_state_dict, st.session_state.active_project, silent=True)
                     # --- END UNIVERSAL SAVE ---
-        
-        
-                    # --- 2. SHADOW LOOP (Gated & Staged) ---
-                    # --- TEMPORARY DEBUG: Check harvest_in_progress at Shadow entry point ---
-                    #print(f"DEBUG SHADOW ENTRY: harvest_in_progress = {st.session_state.get('harvest_in_progress', False)}")
-                    #st.text(f"DEBUG SHADOW ENTRY: harvest_in_progress = {st.session_state.get('harvest_in_progress', False)}") # For UI visibility
-                    # --- END TEMPORARY DEBUG ---
-        
-                    # --- NEW: Shadow Deferral if ANY pending updates ---
-                    if not st.session_state.get("auto_shadow_active", True):
-                        shadow_logs.append("⏸️ Skipped: Auto Shadow is off. Use Run Shadow Now when you want a pass.")
-                    elif st.session_state.get('pending_updates') and len(st.session_state.pending_updates) > 0:
-                        shadow_logs.append("⏳ Skipped: Pending updates exist. Shadow deferring until Staging Area is clear.")
-                        # No further Shadow processing in this turn if pending_updates is not empty
-                    elif not st.session_state.get("harvest_in_progress", False):
-                        try:
-                            shadow_logs = ["🕵️ Shadow: Starting Loop..."]
-                            # A. LOAD STATE COPY
-                            current_state_dict = {k: st.session_state.get(k,'') for k in CORE_SCHEMA.values()}
-                            if "loaded_slots_metadata" in st.session_state:
-                                for k, meta in st.session_state.loaded_slots_metadata.items():
-                                    if meta['slot_type'] == 'user':
-                                        current_state_dict[k] = st.session_state.get(k, '')
-        
-        
-                            # C. FILTER HISTORY
-                            last_harvest_idx = st.session_state.get('last_harvest_message_index', 0)
-                            history_delta = st.session_state.messages[last_harvest_idx:]
-                            recent_history = [m for m in history_delta if "**🕵️ SHADOW LOGS**" not in m["content"]]
-                            # D. SELECT ENGINE
-                            s_eng = st.session_state.get('shadow_engine_set', 'gemma-3-27b-it')
-        
-                            st.session_state.role_stats["shadow"] += 1
-                            updates, logs_str = run_shadow_dispatcher(recent_history, current_state_dict, st.session_state.loaded_slots_metadata, st.session_state.domain_content,
-                                st.session_state.gemini_api_key,current_temp_val, current_top_p_val,s_eng)
-                            shadow_logs.append(logs_str)
-                            # NEW: Flag to track if anything was staged in this Shadow run
-                            any_staged_this_run = False
-                            is_suspect2 = False
-        
-                            # GATE 3: Write to Disk (Review vs Commit)
-                            if updates:
-                                is_review_active = st.session_state.get('review_mode_active', True)
-        
-        
-                                for k, update_data in updates.items(): # Iterate over items, unpack to k and update_data
-                                    v_str = update_data["content"] # Extract the actual content string
-                                    is_suspect_from_shadow = update_data.get("suspect", False) # Extract the suspect flag from Shadow
-        
-                                    # Smart Diff check (re-using logic from main Shadow loop)
-                                    current_val = st.session_state.get(k, "")
-                                    is_different = False
-        
-                                    # Normalize 'v_str' to string if it isn't already
-                                    if isinstance(v_str, (dict, list)): v_str_norm = json.dumps(v_str, indent=2)
-                                    else: v_str_norm = str(v_str) # Use v_str_norm for comparison, v_str for actual content
-        
-                                    try:
-                                        # 1. Try JSON Comparison
-                                        obj_new = json.loads(v_str_norm)
-                                        obj_curr = json.loads(str(current_val))
-                                        if obj_new != obj_curr: is_different = True
-                                    except:
-                                        # 2. Fallback to a more robust String Comparison
-                                        clean_v = v_str_norm.strip()
-                                        if clean_v.startswith("---"):
-                                            clean_v = clean_v[3:].lstrip()
-                                        if clean_v.endswith("---"):
-                                            clean_v = clean_v[:-3].rstrip()
-        
-                                        clean_current = str(current_val).strip()
-                                        if clean_current.startswith("---"):
-                                            clean_current = clean_current[3:].lstrip()
-                                        if clean_current.endswith("---"):
-                                            clean_current = clean_current[:-3].rstrip()
-        
-                                        if clean_v != clean_current:
-                                            is_different = True
-        
-                                    # Skip if effectively identical
-                                    if not is_different:
-                                        shadow_logs.append(f"💤 {k}: Content identical, skipping update.")
-                                        continue
-        
-                                    # Get AI-Managed status from loaded_slots_metadata
-                                    ai_managed = st.session_state.loaded_slots_metadata.get(k, {}).get('ai_managed', False)
 
-                                    # Get old content for audit logging (before potential update)
-                                    current_val_for_audit = st.session_state.get(k, "")
-                                    if ai_managed and not shadow_preserves_existing(current_val_for_audit, v_str):
-                                        shadow_logs.append(
-                                            f"🛑 {k}: Discarded Shadow rewrite that would revert the current file."
-                                        )
-                                        continue
-        
-                                    # --- CORE DECISION LOGIC FOR STAGING VS. COMMIT ---
-        
-                                    # Rule 1: If Review Mode is ON OR if the update is suspect, ALWAYS STAGE.
-                                    if is_review_active or is_suspect_from_shadow:
-                                        if "pending_updates" not in st.session_state: st.session_state.pending_updates = {}
-                                        # Store the dictionary with content and suspect flag for staging area to unpack
-                                        st.session_state.pending_updates[k] = {"content": v_str, "suspect": is_suspect_from_shadow}
-                                        shadow_logs.append(f"📝 STAGED: {k} queued for review (Review Mode ON or Suspect).")
-                                        st.toast(f"Shadow proposed update to {k}")
-                                        any_staged_this_run = True
-        
-                                    # Rule 2: If Review Mode is OFF AND it's an AI-managed slot (and not suspect) -> AUTO-COMMIT.
-                                    elif not is_review_active and ai_managed and not is_suspect_from_shadow:
-                                        proj_db = db.get_project_db_path(BASE_PROJECT_DIR, st.session_state.active_project)
-                                        sys_db = db.get_system_db_path(BASE_SYSTEM_DIR)
-                                        meta = st.session_state.loaded_slots_metadata.get(k, {})
-                                        edit_summary = "AI-generated edit (Shadow auto-commit)" # Placeholder for now
-                                        db.save_slot(
-                                            proj_db, sys_db, k, v_str,
-                                            meta.get('slot_type', 'user'),
-                                            meta.get('description', ''),
-                                            meta.get('scope', 'project'),
-                                            meta.get('owner_id', 'system'),
-                                            meta.get('is_distributed', False),
-                                            meta.get('part_of_dtn', False),
-                                            ai_managed=True,
-                                            old_content=current_val_for_audit,
-                                            edit_summary=edit_summary
-                                        )
-                                        commit_slot_text(k, v_str, replaced_text=current_val_for_audit)
-                                        shadow_logs.append(f"🤖 AI-Managed AUTO-COMMIT: {k} updated directly (Review Mode OFF).")
-        
-                                    # Rule 3: If Review Mode is OFF AND it's NOT an AI-managed slot (and not suspect) -> Shadow takes no action.
-                                    else:
-                                        shadow_logs.append(f"💤 {k}: Not AI-managed, Review Mode OFF, and not suspect. Shadow took no action.")
-
-                            else:
-                                shadow_logs.append("💤 No updates required.")
-                            # --- Force Rerun if any updates were staged in this Shadow run ---
-                            if any_staged_this_run:
-                                st.rerun()
-        
-        
-                        except Exception as e:
-                            err_msg = str(e)
-                            if "429" in err_msg or "ResourceExhausted" in err_msg:
-                                st.warning("AI rate limit reached for Shadow. Please try again in a moment.")
-                                st.session_state.shadow_logs_manual_run.append("🚦 429 Quota Hit - Skipping Shadow.")
-                            else:
-                                st.error(f"Shadow (Manual) Error: {e}")
-                                st.session_state.shadow_logs_manual_run.append(f"💀 CRASH (Manual Shadow): {err_msg}")
-                                print(f"ERROR: {error_detail}") # Log to console for visibility
-                                st.warning("An unexpected error occurred. Please check the sidebar for logs or try again.")
-        
-                    else:
-                        shadow_logs.append("⏳ Skipped: Harvest In Progress.")
+                    # Mark pending before the (possibly long) shadow call so a dropped
+                    # mobile/proxy request can catch up on the next script run.
+                    st.session_state.pending_auto_shadow = True
+                    shadow_logs, any_staged_this_run, shadow_done = run_auto_shadow_turn(
+                        current_temp_val, current_top_p_val
+                    )
+                    st.session_state.shadow_logs = shadow_logs
+                    if shadow_done:
+                        mark_auto_shadow_complete()
+                    if any_staged_this_run:
+                        st.rerun()
         
         except Exception as e:
             st.error(f"System Error: {e}")
@@ -6515,16 +6565,21 @@ if prompt:
 
 # --- END ADDED TRY-EXCEPT BLOCK ---
 
+# --- RENDER DEBUGGER BEFORE RERUN ---
+_dbg_logs = None
+if st.session_state.get("shadow_logs_manual_run"):
+    _dbg_logs = st.session_state.shadow_logs_manual_run
+elif "shadow_logs" in locals() and shadow_logs:
+    _dbg_logs = shadow_logs
+elif st.session_state.get("shadow_logs"):
+    _dbg_logs = st.session_state.shadow_logs
+with st.expander("🕵️ Shadow Debugger", expanded=True):
+    if isinstance(_dbg_logs, list):
+        st.code("\n".join(_dbg_logs), wrap_lines=True)
+    elif _dbg_logs:
+        st.code(_dbg_logs, wrap_lines=True)
+    else:
+        st.code("Waiting for input...", wrap_lines=True)
 
-
-    # --- RENDER DEBUGGER BEFORE RERUN ---
-    with st.expander("🕵️ Shadow Debugger", expanded=True):
-        if "shadow_logs_manual_run" in st.session_state and st.session_state.shadow_logs_manual_run:
-            st.code("\n".join(st.session_state.shadow_logs_manual_run), wrap_lines=True)
-        elif isinstance(shadow_logs, list):
-            st.code("\n".join(shadow_logs), wrap_lines=True)
-        else:
-            st.code(shadow_logs, wrap_lines=True)
-
-    if should_rerun:
-        st.rerun()
+if "should_rerun" in locals() and should_rerun:
+    st.rerun()
