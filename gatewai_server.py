@@ -1,4 +1,8 @@
-"""Cloud entrypoint: sync REST API + reverse-proxy to Streamlit on one PORT."""
+"""Cloud entrypoint: sync REST API + reverse-proxy to Streamlit on one PORT.
+
+Uses Starlette (already required by Streamlit) instead of FastAPI to avoid
+starlette version conflicts at install time.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -7,11 +11,14 @@ import subprocess
 import sys
 import time
 from typing import Optional
+from urllib.parse import parse_qs
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, WebSocket
-from fastapi.responses import JSONResponse
-from starlette.websockets import WebSocketDisconnect
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from project_transfer import (
     PROJECT_ZIP_MAX_BYTES,
@@ -27,28 +34,40 @@ STREAMLIT_PORT = 8501
 STREAMLIT_BASE = f"http://{STREAMLIT_HOST}:{STREAMLIT_PORT}"
 GATEWAI_PASSWORD = os.environ.get("GATEWAI_PASSWORD", "").strip()
 
-app = FastAPI(title="Gatewai Cloud", docs_url=None, redoc_url=None)
 _streamlit_proc: Optional[subprocess.Popen] = None
 _http_client: Optional[httpx.AsyncClient] = None
 _streamlit_ready = False
 
+HOP_BY_HOP = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+}
 
-def _require_password(
-    authorization: Optional[str] = None,
-    x_gatewai_password: Optional[str] = None,
-):
+
+def _auth_or_error(request: Request):
     if not GATEWAI_PASSWORD:
-        raise HTTPException(
+        return JSONResponse(
+            {"detail": "Cloud sync unavailable (GATEWAI_PASSWORD not set)."},
             status_code=503,
-            detail="Cloud sync unavailable (GATEWAI_PASSWORD not set).",
         )
+    authorization = request.headers.get("authorization") or ""
+    x_pw = request.headers.get("x-gatewai-password") or ""
     token = None
-    if authorization and authorization.lower().startswith("bearer "):
+    if authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
-    elif x_gatewai_password:
-        token = x_gatewai_password.strip()
+    elif x_pw:
+        token = x_pw.strip()
     if not token or token != GATEWAI_PASSWORD:
-        raise HTTPException(status_code=401, detail="Unauthorized.")
+        return JSONResponse({"detail": "Unauthorized."}, status_code=401)
+    return None
 
 
 def _start_streamlit():
@@ -104,7 +123,6 @@ async def _wait_for_streamlit(timeout_s: float = 120.0):
     raise RuntimeError("Streamlit did not become ready in time.")
 
 
-@app.on_event("startup")
 async def on_startup():
     global _http_client, _streamlit_ready
     ensure_data_dirs()
@@ -118,7 +136,6 @@ async def on_startup():
     _streamlit_ready = True
 
 
-@app.on_event("shutdown")
 async def on_shutdown():
     global _http_client, _streamlit_proc, _streamlit_ready
     _streamlit_ready = False
@@ -134,62 +151,56 @@ async def on_shutdown():
     _streamlit_proc = None
 
 
-@app.get("/healthz")
-async def healthz():
-    """Unauthenticated liveness for Render health checks."""
+async def healthz(request: Request):
     if not _streamlit_ready or _http_client is None:
         return JSONResponse({"ok": False, "streamlit": False}, status_code=503)
-    return {"ok": True, "streamlit": True}
+    return JSONResponse({"ok": True, "streamlit": True})
 
 
-# --- Sync API ---
-
-
-@app.get("/api/v1/health")
-async def api_health(
-    authorization: Optional[str] = Header(default=None),
-    x_gatewai_password: Optional[str] = Header(default=None, alias="X-Gatewai-Password"),
-):
-    _require_password(authorization, x_gatewai_password)
+async def api_health(request: Request):
+    err = _auth_or_error(request)
+    if err:
+        return err
     projects, _system = ensure_data_dirs()
-    return {
-        "ok": True,
-        "projects_dir": projects,
-        "project_count": len(list_project_names(projects)),
-    }
+    return JSONResponse(
+        {
+            "ok": True,
+            "projects_dir": projects,
+            "project_count": len(list_project_names(projects)),
+        }
+    )
 
 
-@app.get("/api/v1/projects")
-async def api_list_projects(
-    authorization: Optional[str] = Header(default=None),
-    x_gatewai_password: Optional[str] = Header(default=None, alias="X-Gatewai-Password"),
-):
-    _require_password(authorization, x_gatewai_password)
+async def api_list_projects(request: Request):
+    err = _auth_or_error(request)
+    if err:
+        return err
     projects, _system = ensure_data_dirs()
-    return {"projects": list_project_names(projects)}
+    return JSONResponse({"projects": list_project_names(projects)})
 
 
-@app.get("/api/v1/projects/{name}")
-async def api_get_project(
-    name: str,
-    include_globals: int = Query(0),
-    authorization: Optional[str] = Header(default=None),
-    x_gatewai_password: Optional[str] = Header(default=None, alias="X-Gatewai-Password"),
-):
-    _require_password(authorization, x_gatewai_password)
+async def api_get_project(request: Request):
+    err = _auth_or_error(request)
+    if err:
+        return err
+    name = request.path_params["name"]
+    qs = parse_qs(request.url.query)
+    include_globals = (qs.get("include_globals", ["0"])[0] in ("1", "true", "True"))
     projects, system = ensure_data_dirs()
     safe_name = safe_project_folder_name(name)
     try:
         zip_bytes = build_project_zip_bytes(
             safe_name,
-            include_system_globals=bool(include_globals),
+            include_system_globals=include_globals,
             base_project_dir=projects,
             base_system_dir=system,
         )
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Project '{safe_name}' not found.")
+        return JSONResponse(
+            {"detail": f"Project '{safe_name}' not found."}, status_code=404
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse({"detail": str(e)}, status_code=500)
     filename = f"{safe_name}.gatewai.zip"
     return Response(
         content=zip_bytes,
@@ -201,70 +212,59 @@ async def api_get_project(
     )
 
 
-@app.put("/api/v1/projects/{name}")
-async def api_put_project(
-    name: str,
-    request: Request,
-    overwrite: int = Query(0),
-    apply_globals: int = Query(0),
-    authorization: Optional[str] = Header(default=None),
-    x_gatewai_password: Optional[str] = Header(default=None, alias="X-Gatewai-Password"),
-):
-    _require_password(authorization, x_gatewai_password)
+async def api_put_project(request: Request):
+    err = _auth_or_error(request)
+    if err:
+        return err
+    name = request.path_params["name"]
+    qs = parse_qs(request.url.query)
+    overwrite = qs.get("overwrite", ["0"])[0] in ("1", "true", "True")
+    apply_globals = qs.get("apply_globals", ["0"])[0] in ("1", "true", "True")
     projects, system = ensure_data_dirs()
     safe_name = safe_project_folder_name(name)
     body = await request.body()
     if not body:
-        raise HTTPException(status_code=400, detail="Empty zip body.")
+        return JSONResponse({"detail": "Empty zip body."}, status_code=400)
     if len(body) > PROJECT_ZIP_MAX_BYTES:
-        raise HTTPException(
+        return JSONResponse(
+            {
+                "detail": (
+                    f"Zip larger than {PROJECT_ZIP_MAX_BYTES // (1024 * 1024)} MB."
+                )
+            },
             status_code=413,
-            detail=f"Zip larger than {PROJECT_ZIP_MAX_BYTES // (1024 * 1024)} MB.",
         )
     try:
         result = import_project_zip_bytes(
             body,
             safe_name,
-            overwrite=bool(overwrite),
-            apply_system_globals=bool(apply_globals),
+            overwrite=overwrite,
+            apply_system_globals=apply_globals,
             base_project_dir=projects,
             base_system_dir=system,
         )
     except FileExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        return JSONResponse({"detail": str(e)}, status_code=409)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return JSONResponse({"detail": str(e)}, status_code=400)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    return {
-        "ok": True,
-        "project_name": result["project_name"],
-        "globals_applied": result.get("globals_applied", 0),
-        "bytes": len(body),
-    }
+        return JSONResponse({"detail": str(e)}, status_code=500)
+    return JSONResponse(
+        {
+            "ok": True,
+            "project_name": result["project_name"],
+            "globals_applied": result.get("globals_applied", 0),
+            "bytes": len(body),
+        }
+    )
 
 
-# --- Streamlit reverse proxy ---
-
-HOP_BY_HOP = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "content-length",
-}
-
-
-async def _proxy_http(request: Request, path: str):
+async def _proxy_http(request: Request):
     if _http_client is None:
         return JSONResponse({"detail": "Streamlit not ready."}, status_code=503)
 
-    target_path = "/" + path if path else "/"
+    path = request.url.path
+    target_path = path if path else "/"
     if request.url.query:
         target_path = f"{target_path}?{request.url.query}"
 
@@ -301,10 +301,10 @@ async def _proxy_http(request: Request, path: str):
     )
 
 
-async def _proxy_websocket(websocket: WebSocket, upstream_path: str):
+async def proxy_stcore_stream(websocket: WebSocket):
     await websocket.accept()
     qs = websocket.url.query
-    ws_url = f"ws://{STREAMLIT_HOST}:{STREAMLIT_PORT}{upstream_path}"
+    ws_url = f"ws://{STREAMLIT_HOST}:{STREAMLIT_PORT}/_stcore/stream"
     if qs:
         ws_url = f"{ws_url}?{qs}"
 
@@ -365,14 +365,31 @@ async def _proxy_websocket(websocket: WebSocket, upstream_path: str):
             pass
 
 
-@app.websocket("/_stcore/stream")
-async def proxy_stcore_stream(websocket: WebSocket):
-    await _proxy_websocket(websocket, "/_stcore/stream")
-
-
-@app.api_route("/", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
-async def proxy_all(request: Request, path: str = ""):
+async def catch_all(request: Request):
+    path = request.url.path.lstrip("/")
     if path == "healthz" or path.startswith("api/"):
         return JSONResponse({"detail": "Not found."}, status_code=404)
-    return await _proxy_http(request, path)
+    return await _proxy_http(request)
+
+
+routes = [
+    Route("/healthz", healthz, methods=["GET"]),
+    Route("/api/v1/health", api_health, methods=["GET"]),
+    Route("/api/v1/projects", api_list_projects, methods=["GET"]),
+    Route("/api/v1/projects/{name}", api_get_project, methods=["GET"]),
+    Route("/api/v1/projects/{name}", api_put_project, methods=["PUT"]),
+    WebSocketRoute("/_stcore/stream", proxy_stcore_stream),
+    Route("/", catch_all, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]),
+    Route(
+        "/{path:path}",
+        catch_all,
+        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+    ),
+]
+
+app = Starlette(
+    debug=False,
+    routes=routes,
+    on_startup=[on_startup],
+    on_shutdown=[on_shutdown],
+)
