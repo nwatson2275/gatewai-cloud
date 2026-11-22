@@ -557,8 +557,8 @@ def get_project_paths(name):
     paths["assets"] = asset_dir
     return paths
 
-PROJECT_ZIP_WARN_BYTES = 50 * 1024 * 1024
-PROJECT_ZIP_MAX_BYTES = 100 * 1024 * 1024
+PROJECT_ZIP_WARN_BYTES = 500 * 1024 * 1024
+PROJECT_ZIP_MAX_BYTES = 1024 * 1024 * 1024
 SYSTEM_GLOBALS_EXPORT = "system_globals.json"
 
 def _safe_project_folder_name(name):
@@ -567,7 +567,7 @@ def _safe_project_folder_name(name):
     return cleaned or "Imported_Project"
 
 def export_system_globals_payload():
-    """Slim export of global SI slots for desktop↔cloud transfer."""
+    """Slim export of global SI slots for optional backup/migrate zips."""
     sys_db = db.get_system_db_path(BASE_SYSTEM_DIR)
     if not os.path.exists(sys_db):
         return {}
@@ -3088,11 +3088,12 @@ with st.expander("📂 Project Manager", expanded=False):
             else:
                 st.warning("Select a project first.")
 
-    # ROW 3: Desktop ↔ cloud transfer
+    # ROW 3: Optional backup / migrate (zip) — not the primary cloud workflow
     st.markdown("---")
-    st.caption("📦 Transfer Project (desktop ↔ cloud)")
+    st.caption("📦 Backup / migrate (optional)")
     st.caption(
-        "Export a zip on one machine, import it on the other. "
+        "Normal use: open the cloud URL on any device and work on the same project. "
+        "Zip is only for one-time migrate or backup between a local install and cloud. "
         f"Warns above {PROJECT_ZIP_WARN_BYTES // (1024 * 1024)} MB; "
         f"rejects above {PROJECT_ZIP_MAX_BYTES // (1024 * 1024)} MB."
     )
@@ -3143,7 +3144,7 @@ with st.expander("📂 Project Manager", expanded=False):
         "Import project zip",
         type=["zip"],
         key="project_import_uploader",
-        help="Gatewai export zip from desktop or cloud.",
+        help="Optional: import a Gatewai export zip when migrating a local vault to cloud (or the reverse).",
     )
     import_name = st.text_input(
         "Import as project name:",
