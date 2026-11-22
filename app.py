@@ -17,6 +17,23 @@ import zipfile
 import io
 import tempfile
 from datetime import datetime
+from project_transfer import (
+    PROJECT_ZIP_WARN_BYTES,
+    PROJECT_ZIP_MAX_BYTES,
+    SYSTEM_GLOBALS_EXPORT,
+    GLOBAL_CORE as TRANSFER_GLOBAL_CORE,
+    safe_project_folder_name as _safe_project_folder_name,
+    export_system_globals_payload,
+    apply_system_globals_payload,
+    build_project_zip_bytes,
+    import_project_zip_bytes,
+    list_project_names,
+    cloud_list_projects,
+    cloud_push_project,
+    cloud_pull_project,
+    CloudSyncError,
+    DEFAULT_CLOUD_URL,
+)
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from fpdf import FPDF
@@ -269,7 +286,7 @@ CORE_SCHEMA = {
 }
 
 # --- NEW GLOBAL DEFINITION ---
-GLOBAL_CORE = ["SI_Identity", "SI_User_Profile", "SI_Observed_Profile"]
+GLOBAL_CORE = list(TRANSFER_GLOBAL_CORE)
 # SI_Identity seed runs before the password gate (see apply_gatewai_seed_si_identity above).
 # --- END NEW GLOBAL DEFINITION ---
 
@@ -556,177 +573,6 @@ def get_project_paths(name):
     paths["config"] = os.path.join(proj_dir, "config.json") # <--- NEW
     paths["assets"] = asset_dir
     return paths
-
-PROJECT_ZIP_WARN_BYTES = 500 * 1024 * 1024
-PROJECT_ZIP_MAX_BYTES = 1024 * 1024 * 1024
-SYSTEM_GLOBALS_EXPORT = "system_globals.json"
-
-def _safe_project_folder_name(name):
-    cleaned = re.sub(r'[<>:"/\\|?*]', "_", str(name or "").strip())
-    cleaned = cleaned.strip(". ")
-    return cleaned or "Imported_Project"
-
-def export_system_globals_payload():
-    """Slim export of global SI slots for optional backup/migrate zips."""
-    sys_db = db.get_system_db_path(BASE_SYSTEM_DIR)
-    if not os.path.exists(sys_db):
-        return {}
-    payload = {}
-    try:
-        with sqlite3.connect(sys_db, timeout=30) as conn:
-            c = conn.cursor()
-            for slot_name in GLOBAL_CORE:
-                c.execute(
-                    "SELECT content, description, ai_managed FROM memory_slots WHERE slot_name = ?",
-                    (slot_name,),
-                )
-                row = c.fetchone()
-                if row:
-                    payload[slot_name] = {
-                        "content": row[0] if row[0] is not None else "",
-                        "description": row[1] or "",
-                        "ai_managed": bool(row[2]) if row[2] is not None else False,
-                    }
-    except Exception:
-        return {}
-    return payload
-
-def apply_system_globals_payload(payload):
-    if not isinstance(payload, dict) or not payload:
-        return 0
-    sys_db = db.get_system_db_path(BASE_SYSTEM_DIR)
-    db.init_db(sys_db)
-    applied = 0
-    for slot_name in GLOBAL_CORE:
-        entry = payload.get(slot_name)
-        if not isinstance(entry, dict):
-            continue
-        content = entry.get("content", "")
-        description = entry.get("description", "System Core File")
-        ai_managed = bool(entry.get("ai_managed", False))
-        db.save_slot(
-            "",
-            sys_db,
-            slot_name,
-            content if content is not None else "",
-            "core",
-            description,
-            "global",
-            "system",
-            False,
-            False,
-            ai_managed,
-        )
-        applied += 1
-    return applied
-
-def build_project_zip_bytes(project_name, include_system_globals=False):
-    """Zip one project folder (and optional system globals) into memory."""
-    proj_dir = os.path.join(BASE_PROJECT_DIR, project_name)
-    if not os.path.isdir(proj_dir):
-        raise FileNotFoundError(f"Project folder not found: {project_name}")
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(
-            "manifest.json",
-            json.dumps(
-                {
-                    "format": "gatewai-project-v1",
-                    "project_name": project_name,
-                    "exported_at": datetime.now().isoformat(timespec="seconds"),
-                    "includes_system_globals": bool(include_system_globals),
-                },
-                indent=2,
-            ),
-        )
-        for root, _dirs, files in os.walk(proj_dir):
-            for fname in files:
-                full = os.path.join(root, fname)
-                rel = os.path.relpath(full, proj_dir).replace("\\", "/")
-                zf.write(full, f"project/{rel}")
-        if include_system_globals:
-            globals_payload = export_system_globals_payload()
-            zf.writestr(
-                SYSTEM_GLOBALS_EXPORT,
-                json.dumps(globals_payload, indent=2),
-            )
-    return buffer.getvalue()
-
-def import_project_zip_bytes(raw_bytes, target_name, overwrite=False, apply_system_globals=True):
-    """Unpack a Gatewai project zip into Projects/<target_name>/."""
-    if raw_bytes is None:
-        raise ValueError("Empty upload.")
-    if len(raw_bytes) > PROJECT_ZIP_MAX_BYTES:
-        raise ValueError(
-            f"Zip is larger than {PROJECT_ZIP_MAX_BYTES // (1024 * 1024)} MB. "
-            "Trim Assets or history before transferring."
-        )
-    target_name = _safe_project_folder_name(target_name)
-    dest = os.path.join(BASE_PROJECT_DIR, target_name)
-    if os.path.exists(dest) and not overwrite:
-        raise FileExistsError(
-            f"Project '{target_name}' already exists. Choose overwrite or a new name."
-        )
-
-    with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as zf:
-        names = zf.namelist()
-        project_prefix = None
-        for candidate in ("project/",):
-            if any(n.startswith(candidate) for n in names):
-                project_prefix = candidate
-                break
-        if project_prefix is None:
-            # Older/manual zips: flat project files at archive root
-            has_history = any(n.endswith("history.json") or n == "history.json" for n in names)
-            has_db = any(n.endswith("project.db") or n == "project.db" for n in names)
-            if not (has_history or has_db):
-                raise ValueError(
-                    "Not a Gatewai project zip (missing project/ folder or history.json / project.db)."
-                )
-            project_prefix = ""
-
-        if os.path.exists(dest) and overwrite:
-            shutil.rmtree(dest)
-        os.makedirs(dest, exist_ok=True)
-        assets_dir = os.path.join(dest, "Assets")
-        os.makedirs(assets_dir, exist_ok=True)
-
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            name = info.filename.replace("\\", "/")
-            if name in ("manifest.json", SYSTEM_GLOBALS_EXPORT):
-                continue
-            if project_prefix and not name.startswith(project_prefix):
-                continue
-            rel = name[len(project_prefix):] if project_prefix else name
-            if not rel or rel.endswith("/"):
-                continue
-            # Block path escape
-            if ".." in rel.split("/"):
-                continue
-            out_path = os.path.join(dest, *rel.split("/"))
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with zf.open(info, "r") as src, open(out_path, "wb") as out:
-                shutil.copyfileobj(src, out)
-
-        globals_applied = 0
-        if apply_system_globals and SYSTEM_GLOBALS_EXPORT in names:
-            try:
-                payload = json.loads(zf.read(SYSTEM_GLOBALS_EXPORT).decode("utf-8"))
-                globals_applied = apply_system_globals_payload(payload)
-            except Exception:
-                globals_applied = 0
-
-    # Ensure DB schema exists even if zip had no project.db
-    proj_db = db.get_project_db_path(BASE_PROJECT_DIR, target_name)
-    db.init_db(proj_db)
-    db.migrate_db(proj_db)
-    hist_path = os.path.join(dest, "history.json")
-    if not os.path.exists(hist_path):
-        with open(hist_path, "w", encoding="utf-8") as f:
-            json.dump([], f, indent=4)
-    return {"project_name": target_name, "globals_applied": globals_applied}
 
 def load_project_state(name):
     proj_dir = os.path.join(BASE_PROJECT_DIR, name)
@@ -3088,12 +2934,159 @@ with st.expander("📂 Project Manager", expanded=False):
             else:
                 st.warning("Select a project first.")
 
-    # ROW 3: Optional backup / migrate (zip) — not the primary cloud workflow
+    # ROW 3: Desktop ↔ cloud push/pull (no manual zip dance)
+    st.markdown("---")
+    st.caption("☁️ Cloud sync (desktop)")
+    st.caption(
+        "From a local desktop install: push or pull a project to Render in one step. "
+        "If you already work in the cloud URL on every device, you share the same disk—"
+        "no push needed between browsers."
+    )
+    if "cloud_sync_url" not in st.session_state:
+        st.session_state.cloud_sync_url = DEFAULT_CLOUD_URL
+    if "cloud_sync_password" not in st.session_state:
+        st.session_state.cloud_sync_password = ""
+    cloud_url = st.text_input(
+        "Cloud URL:",
+        value=st.session_state.cloud_sync_url,
+        key="cloud_sync_url_input",
+        help="Your Render Gatewai URL (no trailing path).",
+    )
+    if cloud_url != st.session_state.cloud_sync_url:
+        st.session_state.cloud_sync_url = cloud_url
+    cloud_password = st.text_input(
+        "Cloud vault password:",
+        type="password",
+        value=st.session_state.cloud_sync_password,
+        key="cloud_sync_password_input",
+        help="Same GATEWAI_PASSWORD as the cloud login gate.",
+    )
+    if cloud_password != st.session_state.cloud_sync_password:
+        st.session_state.cloud_sync_password = cloud_password
+
+    sync_local_opts = existing if existing else [st.session_state.active_project]
+    push_name = st.selectbox(
+        "Local project to push:",
+        options=sync_local_opts,
+        index=sync_local_opts.index(st.session_state.active_project)
+        if st.session_state.active_project in sync_local_opts
+        else 0,
+        key="cloud_push_project_select",
+    )
+    push_include_globals = st.checkbox(
+        "Push include System globals",
+        value=False,
+        key="cloud_push_include_globals",
+        help="Also send SI_Identity / User Profile / Observed Profile.",
+    )
+    push_overwrite = st.checkbox(
+        "Overwrite if project already exists on cloud",
+        value=False,
+        key="cloud_push_overwrite",
+    )
+    if st.button("⬆️ Push to cloud", use_container_width=True, key="cloud_push_btn"):
+        try:
+            with st.spinner(f"Pushing {push_name}…"):
+                result = cloud_push_project(
+                    st.session_state.cloud_sync_url,
+                    st.session_state.cloud_sync_password,
+                    push_name,
+                    overwrite=push_overwrite,
+                    include_system_globals=push_include_globals,
+                    base_project_dir=BASE_PROJECT_DIR,
+                    base_system_dir=BASE_SYSTEM_DIR,
+                )
+            msg = f"Pushed **{result.get('project_name', push_name)}** to cloud."
+            if result.get("globals_applied"):
+                msg += f" Applied {result['globals_applied']} System global(s) on cloud."
+            st.success(msg)
+        except CloudSyncError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.error(f"Push failed: {e}")
+
+    if st.button("🔄 Refresh cloud project list", use_container_width=True, key="cloud_list_btn"):
+        try:
+            st.session_state.cloud_remote_projects = cloud_list_projects(
+                st.session_state.cloud_sync_url,
+                st.session_state.cloud_sync_password,
+            )
+            st.success(
+                f"Found {len(st.session_state.cloud_remote_projects)} project(s) on cloud."
+            )
+        except CloudSyncError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.error(f"List failed: {e}")
+
+    remote_projects = st.session_state.get("cloud_remote_projects") or []
+    if remote_projects:
+        pull_remote = st.selectbox(
+            "Cloud project to pull:",
+            options=remote_projects,
+            key="cloud_pull_remote_select",
+        )
+        pull_local_name = st.text_input(
+            "Save locally as (blank = same name):",
+            value="",
+            key="cloud_pull_local_name",
+        )
+        pull_include_globals = st.checkbox(
+            "Pull include System globals from cloud",
+            value=False,
+            key="cloud_pull_include_globals",
+        )
+        pull_apply_globals = st.checkbox(
+            "Apply System globals after pull",
+            value=True,
+            key="cloud_pull_apply_globals",
+        )
+        pull_overwrite = st.checkbox(
+            "Overwrite if that local project already exists",
+            value=False,
+            key="cloud_pull_overwrite",
+        )
+        if st.button("⬇️ Pull from cloud", use_container_width=True, key="cloud_pull_btn"):
+            try:
+                with st.spinner(f"Pulling {pull_remote}…"):
+                    result = cloud_pull_project(
+                        st.session_state.cloud_sync_url,
+                        st.session_state.cloud_sync_password,
+                        pull_remote,
+                        local_name=pull_local_name.strip() or None,
+                        overwrite=pull_overwrite,
+                        apply_system_globals=pull_apply_globals,
+                        include_system_globals=pull_include_globals,
+                        base_project_dir=BASE_PROJECT_DIR,
+                        base_system_dir=BASE_SYSTEM_DIR,
+                    )
+                st.session_state.active_project = result["project_name"]
+                st.session_state.loaded_project = None
+                try:
+                    with open(SESSION_FILE, "w") as f:
+                        json.dump({"last_project": result["project_name"]}, f)
+                except Exception:
+                    pass
+                msg = f"Pulled **{result['project_name']}** from cloud."
+                if result.get("globals_applied"):
+                    msg += f" Applied {result['globals_applied']} System global slot(s)."
+                st.success(msg)
+                st.rerun()
+            except CloudSyncError as e:
+                st.error(str(e))
+            except FileExistsError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"Pull failed: {e}")
+    else:
+        st.caption("Refresh the cloud project list to enable Pull.")
+
+    # ROW 4: Optional backup / migrate (zip) — not the primary cloud workflow
     st.markdown("---")
     st.caption("📦 Backup / migrate (optional)")
     st.caption(
         "Normal use: open the cloud URL on any device and work on the same project. "
-        "Zip is only for one-time migrate or backup between a local install and cloud. "
+        "Zip is only for one-time migrate or backup when you need a file copy. "
         f"Warns above {PROJECT_ZIP_WARN_BYTES // (1024 * 1024)} MB; "
         f"rejects above {PROJECT_ZIP_MAX_BYTES // (1024 * 1024)} MB."
     )
