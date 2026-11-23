@@ -415,6 +415,18 @@ st.markdown(
         div[data-testid="stChatInput"] textarea::placeholder {
             color: #757575 !important;
         }
+        /* Mobile: keep chat usable after submit (debugger + tall panes were blowing the layout). */
+        @media (max-width: 768px) {
+            section.main div[data-testid="stVerticalBlockBorderWrapper"][style*="height"] {
+                height: 52vh !important;
+                max-height: 52vh !important;
+            }
+            section.main [data-testid="stExpander"] pre,
+            section.main [data-testid="stExpander"] code {
+                max-height: 140px !important;
+                overflow: auto !important;
+            }
+        }
     </style>
     """,
     unsafe_allow_html=True
@@ -540,7 +552,11 @@ def chat_history_container(height):
     return st.container(**kwargs)
 
 def snap_chat_panes_to_bottom():
-    """Jump every chat pane to the latest message instantly (no smooth scroll-through)."""
+    """Jump chat panes to the latest message instantly (no smooth scroll-through).
+
+    Avoid scrollIntoView — on mobile it scrolls the whole page (often into the
+    Shadow Debugger) instead of the fixed-height chat pane.
+    """
     components.html(
         """
 <script>
@@ -552,26 +568,25 @@ def snap_chat_panes_to_bottom():
     const last = msgs[msgs.length - 1];
     let el = last.parentElement;
     while (el && el !== doc.body) {
-      if (el.scrollHeight > el.clientHeight + 8) {
+      const canScroll = el.scrollHeight > el.clientHeight + 8;
+      if (canScroll && el.clientHeight > 40) {
         try { el.style.scrollBehavior = 'auto'; } catch (e) {}
         el.scrollTop = el.scrollHeight;
+        break;
       }
       el = el.parentElement;
-    }
-    try {
-      last.scrollIntoView({ behavior: 'instant', block: 'end' });
-    } catch (e) {
-      try { last.scrollIntoView(false); } catch (e2) {}
     }
   }
   snap();
   requestAnimationFrame(snap);
-  setTimeout(snap, 0);
-  setTimeout(snap, 120);
+  [0, 80, 200, 450, 900, 1400].forEach(function (ms) {
+    setTimeout(snap, ms);
+  });
 })();
 </script>
         """,
         height=0,
+        width=0,
     )
 
 def persist_slot_folder(slot_name, folder):
@@ -5837,19 +5852,29 @@ with main_tab_chat:
                     st.toast("Discarded unanswered prompt.")
                     st.rerun()
 
-        # Shadow Debugger lives in the chat pane (session-persisted — survives reconnect).
+        # Collapsed by default — an open debugger after submit was blowing mobile layout
+        # and stealing scroll away from the chat pane.
         _dbg_logs = None
         if st.session_state.get("shadow_logs_manual_run"):
             _dbg_logs = st.session_state.shadow_logs_manual_run
         elif st.session_state.get("shadow_logs"):
             _dbg_logs = st.session_state.shadow_logs
-        with st.expander("🕵️ Shadow Debugger", expanded=True):
-            if isinstance(_dbg_logs, list) and _dbg_logs:
-                st.code("\n".join(str(x) for x in _dbg_logs), wrap_lines=True)
-            elif _dbg_logs:
-                st.code(str(_dbg_logs), wrap_lines=True)
-            else:
-                st.code("Waiting for input...", wrap_lines=True)
+        _dbg_has = bool(_dbg_logs) and not (
+            isinstance(_dbg_logs, list)
+            and len(_dbg_logs) == 1
+            and "Waiting" in str(_dbg_logs[0])
+        )
+        _dbg_label = "🕵️ Shadow Debugger"
+        if _dbg_has:
+            _dbg_label += " · updated"
+        with st.expander(_dbg_label, expanded=False):
+            with st.container(height=160):
+                if isinstance(_dbg_logs, list) and _dbg_logs:
+                    st.code("\n".join(str(x) for x in _dbg_logs), wrap_lines=True)
+                elif _dbg_logs:
+                    st.code(str(_dbg_logs), wrap_lines=True)
+                else:
+                    st.code("Waiting for input...", wrap_lines=True)
 #    print("after with col_chat") # <-- ADD THIS LINE
 
 
@@ -6765,6 +6790,10 @@ if prompt:
             set_shadow_debug_logs([f"💀 CRASH: {err_msg}"])
             print(f"ERROR: {error_detail}")
             st.warning("An unexpected error occurred. Please check the sidebar for logs or try again.")
+
+# Re-snap after this run's reply is drawn into the chat pane (mobile especially).
+if prompt or st.session_state.get("shadow_logs"):
+    snap_chat_panes_to_bottom()
 
 if should_rerun:
     st.rerun()
