@@ -572,24 +572,29 @@ def chat_pane_height(desktop=720, mobile=380):
 
 
 def chat_history_container(height):
-    """Fixed-height chat pane. Disable Streamlit autoscroll (it animates through long history)."""
+    """Fixed-height chat pane. Use one-shot autoscroll after send/reply (no iframes)."""
     kwargs = {"height": height}
     try:
         import inspect
         if "autoscroll" in inspect.signature(st.container).parameters:
-            # False = don't animate top→bottom through the whole history
-            kwargs["autoscroll"] = False
+            # True only when flagged — avoids scrolling through the whole archive on every paint.
+            kwargs["autoscroll"] = bool(st.session_state.get("chat_autoscroll", False))
     except Exception:
         pass
-    return st.container(**kwargs)
+    box = st.container(**kwargs)
+    if st.session_state.get("chat_autoscroll"):
+        st.session_state.chat_autoscroll = False
+    return box
+
+
+def request_chat_autoscroll():
+    """Ask the next chat pane render to jump to the latest message."""
+    st.session_state.chat_autoscroll = True
+
 
 def snap_chat_panes_to_bottom():
-    """No-op: components.html iframes were ungluing Streamlit's mobile layout after submit.
-
-    Chat panes use a fixed-height container; users can scroll inside it. Revisit with a
-    non-iframe approach if auto-snap is needed again.
-    """
-    return
+    """Compatibility shim — prefer request_chat_autoscroll() + native container autoscroll."""
+    request_chat_autoscroll()
 
 def render_staging_area():
     """Review pending Shadow/Harvest proposals inside the GateWai tab (not above it).
@@ -3462,6 +3467,7 @@ if submitted is not None:
         else:
             st.session_state.held_chat_prompt = typed
             st.session_state.prompt_submit_in_flight = True
+            request_chat_autoscroll()
             write_pending_turn(typed)
             if not isinstance(st.session_state.get("messages"), list):
                 st.session_state.messages = list(messages) if isinstance(messages, list) else []
@@ -6133,34 +6139,35 @@ with main_tab_chat:
                                 if "WEB" == consumed_content:
                                     st.session_state.temp_web_ctx = ""
 
-                            # Reply lives in session only this run; should_rerun rebuilds one clean chat pane.
-                            st.session_state.messages.append({"role": "model", "content": final_text})
-                            if st.session_state.get("held_chat_prompt") == prompt:
-                                st.session_state.pop("held_chat_prompt", None)
-                            st.session_state.prompt_submit_in_flight = False
-                            clear_pending_turn()
-                            print(f"DEBUG: Appending model response. Current messages length: {len(st.session_state.messages)}")
+                    # Reply lives in session only this run; should_rerun rebuilds one clean chat pane.
+                    st.session_state.messages.append({"role": "model", "content": final_text})
+                    request_chat_autoscroll()
+                    if st.session_state.get("held_chat_prompt") == prompt:
+                        st.session_state.pop("held_chat_prompt", None)
+                    st.session_state.prompt_submit_in_flight = False
+                    clear_pending_turn()
+                    print(f"DEBUG: Appending model response. Current messages length: {len(st.session_state.messages)}")
 
-                            universal_save_state_dict = {}
-                            for core_key in CORE_SCHEMA.values():
-                                universal_save_state_dict[core_key] = st.session_state.get(core_key, '')
-                            if "loaded_slots_metadata" in st.session_state:
-                                universal_save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
-                                for user_key in st.session_state.loaded_slots_metadata.keys():
-                                    if user_key not in CORE_SCHEMA.values() and user_key in st.session_state:
-                                        universal_save_state_dict[user_key] = st.session_state.get(user_key, '')
-                            universal_save_state_dict["messages"] = st.session_state.messages
-                            config_keys = [
-                                "chat_engine_set", "ingest_engine_set", "harvest_engine_set",
-                                "shadow_engine_set", "transcribe_engine_set",
-                                "selected_lens_name", "temp_val", "top_p_val", "memory_depth_val",
-                                "compaction_threshold", "last_harvest_message_index",
-                                "review_mode_active", "auto_shadow_active",
-                            ]
-                            for key in config_keys:
-                                universal_save_state_dict[key] = st.session_state.get(key)
-                            should_rerun = True
-                            save_project_state(universal_save_state_dict, st.session_state.active_project, silent=True)
+                    universal_save_state_dict = {}
+                    for core_key in CORE_SCHEMA.values():
+                        universal_save_state_dict[core_key] = st.session_state.get(core_key, '')
+                    if "loaded_slots_metadata" in st.session_state:
+                        universal_save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
+                        for user_key in st.session_state.loaded_slots_metadata.keys():
+                            if user_key not in CORE_SCHEMA.values() and user_key in st.session_state:
+                                universal_save_state_dict[user_key] = st.session_state.get(user_key, '')
+                    universal_save_state_dict["messages"] = st.session_state.messages
+                    config_keys = [
+                        "chat_engine_set", "ingest_engine_set", "harvest_engine_set",
+                        "shadow_engine_set", "transcribe_engine_set",
+                        "selected_lens_name", "temp_val", "top_p_val", "memory_depth_val",
+                        "compaction_threshold", "last_harvest_message_index",
+                        "review_mode_active", "auto_shadow_active",
+                    ]
+                    for key in config_keys:
+                        universal_save_state_dict[key] = st.session_state.get(key)
+                    should_rerun = True
+                    save_project_state(universal_save_state_dict, st.session_state.active_project, silent=True)
 
                             # Durable marker before the (possibly long) shadow call so a
                             # dropped mobile/proxy request can catch up on the next run.
@@ -6194,8 +6201,10 @@ with main_tab_chat:
                     print(f"ERROR: {error_detail}")
                     st.warning("An unexpected error occurred. Please check the sidebar for logs or try again.")
 
+        # Defer st.rerun() until AFTER the Editor tab renders. Rerunning here left the
+        # Editor tab empty on mobile until a full app restart.
         if should_rerun:
-            st.rerun()
+            st.session_state.gatewai_pending_rerun = True
 
 #    print("after with col_chat") # <-- ADD THIS LINE
 
@@ -6794,3 +6803,8 @@ with main_tab_editor:
             except Exception as e:
                 st.error(f"Error reading file: {e}")
             pass
+
+# Both tabs have been drawn — safe to rerun without blanking the Editor.
+if st.session_state.pop("gatewai_pending_rerun", False):
+    request_chat_autoscroll()
+    st.rerun()
