@@ -467,10 +467,11 @@ def read_chat_draft_cookie():
 
 
 def install_mobile_resume_guard():
-    """Mobile: keep chat draft + force-clear pale/double UI (including after submit).
+    """Mobile: persist chat draft across lock/unlock. No auto-reload loops.
 
-    Ghost UIs often appear after lock OR after a long prompt submit/rerun; they block
-    scrolling to the model reply. Detect more aggressively and reload once (draft saved).
+    Earlier ghost-UI detectors false-fired on Streamlit's normal duplicate tab DOM
+    and kept calling location.reload(). Draft save/restore stays; reload is manual
+    only via a small banner when a *true* stacked app root is detected.
     """
     components.html(
         f"""
@@ -484,24 +485,6 @@ def install_mobile_resume_guard():
 
   const LS_KEY = '{_CHAT_DRAFT_LS}';
   const COOKIE = '{_CHAT_DRAFT_COOKIE}';
-  const RELOAD_AT = 'gatewai_reload_at';
-  const READY_AT = 'gatewai_guard_ready_at';
-  let reloading = false;
-  let hiddenAt = 0;
-
-  try {{
-    if (!w.sessionStorage.getItem(READY_AT)) {{
-      w.sessionStorage.setItem(READY_AT, String(Date.now()));
-    }}
-  }} catch (e) {{}}
-
-  function isMobile() {{
-    try {{
-      return /Android|iPhone|iPad|iPod|Mobile/i.test(w.navigator.userAgent || '');
-    }} catch (e) {{
-      return false;
-    }}
-  }}
 
   function chatTextarea() {{
     return doc.querySelector('[data-testid="stChatInput"] textarea');
@@ -560,67 +543,35 @@ def install_mobile_resume_guard():
     return true;
   }}
 
-  function countLabel(tabs, needle) {{
-    let n = 0;
-    for (let i = 0; i < tabs.length; i++) {{
-      const t = (tabs[i].textContent || '').toLowerCase();
-      if (t.indexOf(needle) >= 0) n += 1;
-    }}
-    return n;
+  // Only a real stacked Streamlit shell — NOT duplicate tab nodes (normal in Streamlit).
+  function hasStackedAppShell() {{
+    return doc.querySelectorAll('[data-testid="stAppViewContainer"]').length > 1
+      || doc.querySelectorAll('[data-testid="stApp"]').length > 1;
   }}
 
-  function hasDoubleUi() {{
-    const tabs = doc.querySelectorAll('[role="tab"]');
-    if (countLabel(tabs, 'gatewai') > 1) return true;
-    if (countLabel(tabs, 'editor') > 1) return true;
-
-    let lists = 0;
-    doc.querySelectorAll('[role="tablist"]').forEach(function (tl) {{
-      const t = (tl.textContent || '');
-      if (/gatewai/i.test(t) && /editor/i.test(t)) lists += 1;
-    }});
-    if (lists > 1) return true;
-
-    if (doc.querySelectorAll('[data-testid="stAppViewContainer"]').length > 1) return true;
-    if (doc.querySelectorAll('section.main').length > 1) return true;
-    if (doc.querySelectorAll('[data-testid="stChatInput"]').length > 1) return true;
-    // Stacked ghost: more than one Streamlit app root.
-    if (doc.querySelectorAll('[data-testid="stApp"]').length > 1) return true;
-    return false;
-  }}
-
-  function guardReady() {{
-    try {{
-      const ready = parseInt(w.sessionStorage.getItem(READY_AT) || '0', 10);
-      return Date.now() - ready > 2500;
-    }} catch (e) {{
-      return true;
-    }}
-  }}
-
-  function softReload(reason) {{
-    if (reloading) return;
-    if (!isMobile() && reason.indexOf('double') < 0 && reason.indexOf('bfcache') < 0) return;
-    try {{
-      const last = parseInt(w.sessionStorage.getItem(RELOAD_AT) || '0', 10);
-      if (Date.now() - last < 10000) return;
-      w.sessionStorage.setItem(RELOAD_AT, String(Date.now()));
-      w.sessionStorage.setItem(READY_AT, String(Date.now()));
-    }} catch (e) {{}}
-    saveDraftFromDom();
-    writeDraftCookie(readDraft());
-    reloading = true;
-    try {{
-      console.log('Gatewai resume guard reload:', reason);
+  function showReloadBanner() {{
+    if (doc.getElementById('gatewai-reload-banner')) return;
+    if (!hasStackedAppShell()) return;
+    const bar = doc.createElement('div');
+    bar.id = 'gatewai-reload-banner';
+    bar.setAttribute('style',
+      'position:fixed;left:0;right:0;top:0;z-index:999999;padding:10px 12px;' +
+      'background:#b71c1c;color:#fff;font:600 14px/1.3 system-ui,sans-serif;' +
+      'display:flex;gap:10px;align-items:center;justify-content:space-between;'
+    );
+    bar.innerHTML = '<span>Display glitch detected. Tap to refresh (your draft is saved).</span>';
+    const btn = doc.createElement('button');
+    btn.textContent = 'Refresh';
+    btn.setAttribute('style',
+      'border:0;border-radius:6px;padding:8px 12px;font-weight:700;cursor:pointer;'
+    );
+    btn.onclick = function () {{
+      saveDraftFromDom();
+      writeDraftCookie(readDraft());
       w.location.reload();
-    }} catch (e) {{
-      reloading = false;
-    }}
-  }}
-
-  function checkDouble(reason) {{
-    if (!guardReady()) return;
-    if (hasDoubleUi()) softReload(reason);
+    }};
+    bar.appendChild(btn);
+    doc.body.appendChild(bar);
   }}
 
   function snapChatPaneOnly() {{
@@ -661,63 +612,39 @@ def install_mobile_resume_guard():
 
   doc.addEventListener('visibilitychange', function () {{
     if (doc.visibilityState === 'hidden') {{
-      hiddenAt = Date.now();
       saveDraftFromDom();
       writeDraftCookie(readDraft());
       return;
     }}
     if (doc.visibilityState !== 'visible') return;
-    const away = hiddenAt ? (Date.now() - hiddenAt) : 0;
-    hiddenAt = 0;
     setTimeout(restoreDraftToBox, 200);
     setTimeout(restoreDraftToBox, 600);
-    setTimeout(function () {{ checkDouble('double-ui-wake'); }}, 400);
-    setTimeout(function () {{ checkDouble('double-ui-wake2'); }}, 1200);
-    // Long lock often leaves a ghost even when detectors miss — draft is saved first.
-    if (isMobile() && away >= 20000) {{
-      setTimeout(function () {{
-        if (hasDoubleUi()) softReload('wake-double');
-        else {{
-          snapChatPaneOnly();
-          setTimeout(snapChatPaneOnly, 400);
-        }}
-      }}, 700);
-    }}
+    setTimeout(showReloadBanner, 800);
+    setTimeout(snapChatPaneOnly, 500);
   }});
 
   w.addEventListener('pageshow', function (ev) {{
     if (ev && ev.persisted) {{
+      saveDraftFromDom();
       writeDraftCookie(readDraft());
-      softReload('bfcache');
-    }} else {{
-      setTimeout(restoreDraftToBox, 250);
-      setTimeout(restoreDraftToBox, 800);
-      setTimeout(function () {{ checkDouble('double-ui-pageshow'); }}, 600);
-      setTimeout(snapChatPaneOnly, 500);
-      setTimeout(snapChatPaneOnly, 1200);
     }}
+    setTimeout(restoreDraftToBox, 250);
+    setTimeout(restoreDraftToBox, 800);
+    setTimeout(showReloadBanner, 900);
+    setTimeout(snapChatPaneOnly, 600);
   }});
 
-  try {{
-    const obs = new MutationObserver(function () {{
-      checkDouble('double-ui-mut');
-    }});
-    obs.observe(doc.body, {{ childList: true, subtree: true }});
-  }} catch (e) {{}}
-
+  // Occasional banner check only — never auto location.reload().
   setInterval(function () {{
     if (doc.visibilityState !== 'visible') return;
     restoreDraftToBox();
-    checkDouble('double-ui-poll');
-    snapChatPaneOnly();
-  }}, 1200);
+    showReloadBanner();
+  }}, 4000);
 
   setTimeout(restoreDraftToBox, 100);
   setTimeout(restoreDraftToBox, 400);
   setTimeout(restoreDraftToBox, 1000);
-  setTimeout(function () {{ checkDouble('double-ui-boot'); }}, 3000);
-  setTimeout(snapChatPaneOnly, 800);
-  setTimeout(snapChatPaneOnly, 1600);
+  setTimeout(snapChatPaneOnly, 900);
 }})();
 </script>
         """,
