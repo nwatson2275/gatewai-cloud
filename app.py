@@ -195,10 +195,61 @@ def _emit_gatewai_auth_cookie(token):
     )
 
 
+def pending_turn_path(project_name=None):
+    project_name = project_name or st.session_state.get("active_project") or ""
+    if not project_name:
+        return None
+    return os.path.join(BASE_PROJECT_DIR, project_name, "pending_turn.json")
+
+
+def write_pending_turn(prompt_text, project_name=None):
+    """Durable in-flight submit marker so session recycle can still call the API."""
+    path = pending_turn_path(project_name)
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {
+            "prompt": str(prompt_text or ""),
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        print(f"ERROR: write_pending_turn failed: {e}")
+
+
+def read_pending_turn(project_name=None):
+    path = pending_turn_path(project_name)
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and str(data.get("prompt") or "").strip():
+            return data
+    except Exception as e:
+        print(f"ERROR: read_pending_turn failed: {e}")
+    return None
+
+
+def clear_pending_turn(project_name=None):
+    path = pending_turn_path(project_name)
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception as e:
+            print(f"ERROR: clear_pending_turn failed: {e}")
+
+
 def scrub_chat_hold():
     """Clear in-flight prompt recovery so deletes/wipes don't resurrect text."""
     st.session_state.pop("held_chat_prompt", None)
     st.session_state.pop("unanswered_attempt", None)
+    st.session_state.pop("prompt_submit_in_flight", None)
+    clear_pending_turn()
 
 
 if _GATEWAI_PASSWORD:
@@ -3112,9 +3163,11 @@ if submitted is not None:
             and str(messages[-1].get("content") or "").strip()
         )
         if already_answered:
-            st.session_state.pop("held_chat_prompt", None)
+            scrub_chat_hold()
         else:
             st.session_state.held_chat_prompt = typed
+            st.session_state.prompt_submit_in_flight = True
+            write_pending_turn(typed)
             if not isinstance(st.session_state.get("messages"), list):
                 st.session_state.messages = list(messages) if isinstance(messages, list) else []
             if not (
@@ -3144,6 +3197,7 @@ if submitted is not None:
                         os.fsync(hist_file.fileno())
                 except Exception as e:
                     print(f"ERROR: early history.json save failed: {e}")
+
 
 # --- 5. TOP COMMAND BAR (PROJECT MANAGER) ---
 st.caption(f"📍 Active Project: {st.session_state.active_project}")
@@ -6260,10 +6314,14 @@ with main_tab_editor:
 # --- 9. LOGIC (DEBUG MODE - ROLE COUNTING & SHADOW SELECT) ---
 #print("DEBUG: About to enter the main input processing block.") # <-- ADD THIS LINE
 prompt = st.session_state.get("held_chat_prompt")
-# Do NOT auto-fire unanswered disk prompts after mobile reconnect/login.
-# Offer explicit Resume / Discard instead (prevents "erased prompt came back").
+# Recover unanswered trailing user turns:
+# - Auto-resume when this submit is still in-flight (session flag or pending_turn.json).
+#   Mobile often recycles the Streamlit session without a login bounce; without this
+#   the prompt sits on disk and never reaches the API.
+# - Otherwise ask Resume / Discard (manual erase / stale reconnect cases).
 if not prompt:
     pending_messages = st.session_state.get("messages") or []
+    trailing = ""
     if (
         pending_messages
         and isinstance(pending_messages[-1], dict)
@@ -6271,6 +6329,29 @@ if not prompt:
         and str(pending_messages[-1].get("content") or "").strip()
     ):
         trailing = str(pending_messages[-1]["content"])
+    pending_turn = read_pending_turn()
+    pending_prompt = str((pending_turn or {}).get("prompt") or "").strip()
+    in_flight = bool(st.session_state.get("prompt_submit_in_flight")) or (
+        bool(pending_prompt) and (not trailing or pending_prompt == trailing)
+    )
+    if in_flight and (trailing or pending_prompt):
+        # Prefer the durable pending_turn text when present.
+        prompt = pending_prompt or trailing
+        st.session_state.held_chat_prompt = prompt
+        st.session_state.prompt_submit_in_flight = True
+        if not isinstance(st.session_state.get("messages"), list):
+            st.session_state.messages = list(pending_messages) if pending_messages else []
+        if (
+            st.session_state.messages
+            and isinstance(st.session_state.messages[-1], dict)
+            and st.session_state.messages[-1].get("role") == "user"
+        ):
+            st.session_state.messages[-1]["content"] = prompt
+        else:
+            st.session_state.messages.append({"role": "user", "content": prompt})
+        st.session_state.unanswered_attempt = len(st.session_state.messages)
+        st.info("Resuming interrupted send…")
+    elif trailing:
         preview = trailing if len(trailing) <= 180 else trailing[:180] + "…"
         st.warning(
             "Unanswered prompt on disk (often left behind when mobile reconnects mid-reply)."
@@ -6280,6 +6361,8 @@ if not prompt:
         with resume_col:
             if st.button("▶️ Resume unanswered prompt", use_container_width=True, key="resume_unanswered_btn"):
                 st.session_state.held_chat_prompt = trailing
+                st.session_state.prompt_submit_in_flight = True
+                write_pending_turn(trailing)
                 st.session_state.unanswered_attempt = len(pending_messages)
                 st.rerun()
         with discard_col:
@@ -6635,6 +6718,8 @@ if prompt:
                     st.session_state.messages.append({"role": "model", "content": final_text})
                     if st.session_state.get("held_chat_prompt") == prompt:
                         st.session_state.pop("held_chat_prompt", None)
+                    st.session_state.prompt_submit_in_flight = False
+                    clear_pending_turn()
                     print(f"DEBUG: Appending model response. Current messages length: {len(st.session_state.messages)}")
         
                     #st.rerun()
