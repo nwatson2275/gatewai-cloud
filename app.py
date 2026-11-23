@@ -317,44 +317,46 @@ if 'deepseek_api_key' not in st.session_state:
 if not st.session_state.gemini_api_key and not st.session_state.deepseek_api_key:
     st.warning("⚠️ No API Key provided. Some AI functionalities will be disabled.")
 
-# --- 1.1 UI & CSS ---
+# --- 1.1 UI & CSS (light theme: black text on white) ---
 st.markdown(
     """
     <style>
         [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
-        [data-testid="stSidebar"] textarea { color: #ffffff !important; background-color: #262730 !important; }
+        [data-testid="stSidebar"] textarea {
+            color: #212121 !important;
+            background-color: #ffffff !important;
+        }
         [data-testid="stSidebar"] code {
             white-space: pre-wrap !important; word-break: break-word !important;
-            display: block; width: 100%; background-color: #1e1e1e; padding: 10px; border-radius: 5px;
-            font-size: 0.85rem; color: #e0e0e0;
+            display: block; width: 100%; background-color: #f0f2f6; padding: 10px; border-radius: 5px;
+            font-size: 0.85rem; color: #212121;
         }
-        /* --- ADD THIS NEW RULE --- */
         code, pre {
-            white-space: pre-wrap !important; /* Force wrapping within code blocks */
-            word-break: break-word;          /* Breaks long words to prevent overflow */
-            overflow-wrap: break_word;       /* Standard property for word breaking */
+            white-space: pre-wrap !important;
+            word-break: break-word;
+            overflow-wrap: break-word;
         }
-        /* --- END NEW RULE --- */
-        .section-header { margin-top: 15px; margin-bottom: 5px; font-weight: bold; color: #aaa; border-bottom: 1px solid #444; }
+        .section-header {
+            margin-top: 15px; margin-bottom: 5px; font-weight: bold;
+            color: #424242; border-bottom: 1px solid #e0e0e0;
+        }
         [data-testid="column"]:nth-child(2) [data-testid="stVerticalBlock"] {
-            height: 85vh; overflow-y: auto; border-left: 1px solid #333; padding-left: 20px;
+            height: 85vh; overflow-y: auto; border-left: 1px solid #e0e0e0; padding-left: 20px;
         }
         div.stButton > button:first-child { width: 100%; border-radius: 5px; }
         .purge-btn { border: 1px solid #ff4b4b; color: #ff4b4b; }
         .st-emotion-cache-1r6c0hp, .st-emotion-cache-1oe5f0g, .st-emotion-cache-1v0bbx, .st-emotion-cache-1w0pmv7 {
             overflow-x: hidden !important;
         }
-        /* --- NEW: Styling for chat input area in Help tab --- */
-        /* Target the chat input's textarea */
         div[data-testid="stChatInput"] textarea {
-            background-color: #f0f2f6 !important; /* Light grey background */
-            color: #333333 !important; /* Dark text color */
+            background-color: #ffffff !important;
+            color: #212121 !important;
         }
-        /* Target the placeholder text within the chat input's textarea */
         div[data-testid="stChatInput"] textarea::placeholder {
-            color: #666666 !important; /* Darker grey for placeholder */
+            color: #757575 !important;
         }
-           """,
+    </style>
+    """,
     unsafe_allow_html=True
 )
 
@@ -2275,7 +2277,7 @@ def render_live_editor(selected_file):
     typed = st_ace(
         value=st.session_state[seed_key],
         language="markdown",
-        theme="tomorrow_night_blue",
+        theme="chrome",
         keybinding="vscode",
         font_size=14,
         height=500,
@@ -5713,6 +5715,53 @@ with main_tab_chat:
 
     with col_chat:
         chat_container = render_project_chat(900, "chat_earlier_main")
+
+        # Keep send/resume UI inside the chat pane (not below the tabs — that looked
+        # like a second dialogue and hid Thinking/errors away from the conversation).
+        _chat_msgs = st.session_state.get("messages") or []
+        _trailing = ""
+        if (
+            _chat_msgs
+            and isinstance(_chat_msgs[-1], dict)
+            and _chat_msgs[-1].get("role") == "user"
+            and str(_chat_msgs[-1].get("content") or "").strip()
+        ):
+            _trailing = str(_chat_msgs[-1]["content"])
+        _pending_turn = read_pending_turn()
+        _pending_prompt = str((_pending_turn or {}).get("prompt") or "").strip()
+        _in_flight = bool(st.session_state.get("held_chat_prompt")) or bool(
+            st.session_state.get("prompt_submit_in_flight")
+        ) or (
+            bool(_pending_prompt) and (not _trailing or _pending_prompt == _trailing)
+        )
+        _send_err = st.session_state.pop("chat_send_error", None)
+        if _send_err:
+            st.error(f"Last send failed: {_send_err}")
+        if _in_flight:
+            st.caption("⏳ Sending to the model…")
+            if not st.session_state.get("gemini_api_key") and not st.session_state.get("deepseek_api_key"):
+                st.error("No API key loaded in this session. Re-enter it in the sidebar, then tap Resume.")
+        elif _trailing:
+            _preview = _trailing if len(_trailing) <= 180 else _trailing[:180] + "…"
+            st.warning("Unanswered prompt on disk (reconnect often leaves this behind).")
+            st.caption(_preview)
+            _rcol, _dcol = st.columns(2)
+            with _rcol:
+                if st.button("▶️ Resume unanswered prompt", use_container_width=True, key="resume_unanswered_chat_btn"):
+                    st.session_state.held_chat_prompt = _trailing
+                    st.session_state.prompt_submit_in_flight = True
+                    write_pending_turn(_trailing)
+                    st.session_state.unanswered_attempt = len(_chat_msgs)
+                    st.rerun()
+            with _dcol:
+                if st.button("🗑️ Discard unanswered prompt", use_container_width=True, key="discard_unanswered_chat_btn"):
+                    st.session_state.messages.pop()
+                    scrub_chat_hold()
+                    _save = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
+                    _save["messages"] = st.session_state.messages
+                    save_project_state(_save, st.session_state.active_project)
+                    st.toast("Discarded unanswered prompt.")
+                    st.rerun()
 #    print("after with col_chat") # <-- ADD THIS LINE
 
 
@@ -6314,11 +6363,7 @@ with main_tab_editor:
 # --- 9. LOGIC (DEBUG MODE - ROLE COUNTING & SHADOW SELECT) ---
 #print("DEBUG: About to enter the main input processing block.") # <-- ADD THIS LINE
 prompt = st.session_state.get("held_chat_prompt")
-# Recover unanswered trailing user turns:
-# - Auto-resume when this submit is still in-flight (session flag or pending_turn.json).
-#   Mobile often recycles the Streamlit session without a login bounce; without this
-#   the prompt sits on disk and never reaches the API.
-# - Otherwise ask Resume / Discard (manual erase / stale reconnect cases).
+# Silent auto-resume only (Resume/Discard UI lives in the chat tab above).
 if not prompt:
     pending_messages = st.session_state.get("messages") or []
     trailing = ""
@@ -6335,7 +6380,6 @@ if not prompt:
         bool(pending_prompt) and (not trailing or pending_prompt == trailing)
     )
     if in_flight and (trailing or pending_prompt):
-        # Prefer the durable pending_turn text when present.
         prompt = pending_prompt or trailing
         st.session_state.held_chat_prompt = prompt
         st.session_state.prompt_submit_in_flight = True
@@ -6350,30 +6394,6 @@ if not prompt:
         else:
             st.session_state.messages.append({"role": "user", "content": prompt})
         st.session_state.unanswered_attempt = len(st.session_state.messages)
-        st.info("Resuming interrupted send…")
-    elif trailing:
-        preview = trailing if len(trailing) <= 180 else trailing[:180] + "…"
-        st.warning(
-            "Unanswered prompt on disk (often left behind when mobile reconnects mid-reply)."
-        )
-        st.caption(preview)
-        resume_col, discard_col = st.columns(2)
-        with resume_col:
-            if st.button("▶️ Resume unanswered prompt", use_container_width=True, key="resume_unanswered_btn"):
-                st.session_state.held_chat_prompt = trailing
-                st.session_state.prompt_submit_in_flight = True
-                write_pending_turn(trailing)
-                st.session_state.unanswered_attempt = len(pending_messages)
-                st.rerun()
-        with discard_col:
-            if st.button("🗑️ Discard unanswered prompt", use_container_width=True, key="discard_unanswered_btn"):
-                st.session_state.messages.pop()
-                scrub_chat_hold()
-                save_state_dict = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
-                save_state_dict["messages"] = st.session_state.messages
-                save_project_state(save_state_dict, st.session_state.active_project)
-                st.toast("Discarded unanswered prompt.")
-                st.rerun()
 answered_already = False
 if prompt and len(st.session_state.get("messages") or []) >= 2:
     previous = st.session_state.messages[-2]
@@ -6649,11 +6669,10 @@ if prompt:
                     # Also reset any flags that might have been set for this turn's processing
                     # (e.g., if you had a flag like 'ai_call_in_progress')
     
-                    st.warning("AI call failed. Please check the sidebar for logs or try again.")
-                    # Optionally, you might want to clear the user's input from the UI here,
-                    # or re-render the last known good state.
-                    response = None # Explicitly set response to None on failure
-                    # For now, we'll just log the error and allow the script to continue/rerun.
+                    st.session_state.chat_send_error = err_msg
+                    st.warning(f"AI call failed: {err_msg}")
+                    response = None
+                    # Keep pending_turn so the next run can retry instead of dropping the prompt.
 
                     # --- END MODIFICATION 2 ---
                 if response: # Only process if response was successfully generated
