@@ -601,26 +601,31 @@ def snap_chat_panes_to_bottom(force=False):
 
 
 def pin_editor_tab_to_top():
-    """When the Editor tab is selected, keep the page at the top.
+    """Scroll to top whenever the Editor tab is selected (including later clicks).
 
-    Only acts if the Editor tab is aria-selected — Streamlit still runs this
-    block while GateWai is open, and we must not yank chat/staging scroll.
+    Streamlit often switches tabs client-side without a script rerun, so a one-shot
+    inject only helps the first open. Install a durable click/MutationObserver hook.
     """
     components.html(
         """
 <script>
 (function () {
   const doc = window.parent.document;
-  function editorTabActive() {
+  const FLAG = '__gatewaiEditorPinTopHook';
+  function editorTabEl() {
     const tabs = doc.querySelectorAll('button[role="tab"], [role="tab"]');
     for (let i = 0; i < tabs.length; i++) {
       const t = tabs[i];
       const label = (t.textContent || '').toLowerCase();
-      if (label.indexOf('editor') === -1) continue;
-      if (t.getAttribute('aria-selected') === 'true') return true;
-      if (t.getAttribute('aria-selected') === true) return true;
-      if ((t.className || '').toString().indexOf('selected') >= 0) return true;
+      if (label.indexOf('editor') !== -1) return t;
     }
+    return null;
+  }
+  function editorTabActive() {
+    const t = editorTabEl();
+    if (!t) return false;
+    if (t.getAttribute('aria-selected') === 'true') return true;
+    if ((t.className || '').toString().toLowerCase().indexOf('selected') >= 0) return true;
     return false;
   }
   function toTop() {
@@ -639,11 +644,41 @@ def pin_editor_tab_to_top():
     });
     try { window.parent.scrollTo(0, 0); } catch (e) {}
   }
-  toTop();
-  requestAnimationFrame(toTop);
-  [50, 100, 200, 400, 800, 1200, 1800, 2500].forEach(function (ms) {
-    setTimeout(toTop, ms);
-  });
+  function scheduleTop() {
+    toTop();
+    requestAnimationFrame(toTop);
+    [30, 80, 160, 320, 600, 1000].forEach(function (ms) {
+      setTimeout(toTop, ms);
+    });
+  }
+  if (!doc.documentElement[FLAG]) {
+    doc.documentElement[FLAG] = true;
+    doc.documentElement.__gatewaiEditorWasActive = editorTabActive();
+    doc.addEventListener('click', function (e) {
+      const tab = e.target && e.target.closest && e.target.closest('[role="tab"]');
+      if (!tab) return;
+      const label = (tab.textContent || '').toLowerCase();
+      if (label.indexOf('editor') === -1) return;
+      // Explicit Editor click — always jump to top (covers later opens without a rerun).
+      scheduleTop();
+      doc.documentElement.__gatewaiEditorWasActive = true;
+    }, true);
+    try {
+      const obs = new MutationObserver(function () {
+        const active = editorTabActive();
+        const was = !!doc.documentElement.__gatewaiEditorWasActive;
+        if (active && !was) scheduleTop();
+        doc.documentElement.__gatewaiEditorWasActive = active;
+      });
+      obs.observe(doc.body, {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['aria-selected', 'class']
+      });
+    } catch (e) {}
+  }
+  // First paint only if Editor is already the active tab.
+  if (editorTabActive()) scheduleTop();
 })();
 </script>
         """,
