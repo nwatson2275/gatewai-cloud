@@ -424,15 +424,19 @@ st.markdown(
                 max-height: 140px !important;
                 overflow: auto !important;
             }
-            /* Hide zero-height component iframes that still break mobile flex layout */
-            section.main iframe[height="0"],
-            section.main iframe[height="1"] {
-                display: none !important;
-                position: absolute !important;
-                width: 0 !important;
-                height: 0 !important;
-                border: 0 !important;
-            }
+        }
+        /* Keep snap iframes out of flex flow — never display:none (Safari skips those scripts). */
+        section.main iframe[height="0"],
+        section.main iframe[height="1"] {
+            position: absolute !important;
+            left: 0 !important;
+            top: 0 !important;
+            width: 0 !important;
+            height: 0 !important;
+            border: 0 !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            overflow: hidden !important;
         }
     </style>
     """,
@@ -543,7 +547,8 @@ def render_project_chat(height, earlier_key):
         for message in shown:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-    snap_chat_panes_to_bottom()
+    # Native autoscroll + JS snap (flagged after send/reply, otherwise still pin to end).
+    snap_chat_panes_to_bottom(force=True)
     return box
 
 def is_mobile_client():
@@ -572,29 +577,67 @@ def chat_pane_height(desktop=720, mobile=380):
 
 
 def chat_history_container(height):
-    """Fixed-height chat pane. Use one-shot autoscroll after send/reply (no iframes)."""
+    """Fixed-height chat pane pinned to the latest message.
+
+    Only the latest slice is shown (CHAT_VISIBLE_STEP), so always-on autoscroll is safe.
+    """
     kwargs = {"height": height}
     try:
         import inspect
         if "autoscroll" in inspect.signature(st.container).parameters:
-            # True only when flagged — avoids scrolling through the whole archive on every paint.
-            kwargs["autoscroll"] = bool(st.session_state.get("chat_autoscroll", False))
+            kwargs["autoscroll"] = True
     except Exception:
         pass
-    box = st.container(**kwargs)
-    if st.session_state.get("chat_autoscroll"):
-        st.session_state.chat_autoscroll = False
-    return box
+    return st.container(**kwargs)
 
 
 def request_chat_autoscroll():
-    """Ask the next chat pane render to jump to the latest message."""
+    """Mark that the next paint should JS-snap the chat pane to the end."""
     st.session_state.chat_autoscroll = True
 
 
-def snap_chat_panes_to_bottom():
-    """Compatibility shim — prefer request_chat_autoscroll() + native container autoscroll."""
-    request_chat_autoscroll()
+def snap_chat_panes_to_bottom(force=False):
+    """Scroll the fixed-height chat pane to the latest message (layout-safe iframe).
+
+    Does not use scrollIntoView (that scrolls the whole mobile page). Only sets
+    scrollTop on the nearest scrollable ancestor of the last chat bubble.
+    """
+    if not force and not st.session_state.get("chat_autoscroll"):
+        return
+    st.session_state.chat_autoscroll = False
+    components.html(
+        """
+<script>
+(function () {
+  const doc = window.parent.document;
+  function snap() {
+    const root = doc.querySelector('section.main') || doc;
+    const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
+    if (!msgs.length) return;
+    const last = msgs[msgs.length - 1];
+    let el = last.parentElement;
+    while (el && el !== doc.body) {
+      const style = window.parent.getComputedStyle(el);
+      const oy = style.overflowY;
+      const scrollable = (oy === 'auto' || oy === 'scroll' || oy === 'overlay')
+        || (el.scrollHeight > el.clientHeight + 8);
+      if (scrollable && el.clientHeight > 40) {
+        try { el.style.scrollBehavior = 'auto'; } catch (e) {}
+        el.scrollTop = el.scrollHeight;
+        return;
+      }
+      el = el.parentElement;
+    }
+  }
+  snap();
+  requestAnimationFrame(snap);
+  [50, 150, 350, 700, 1200].forEach(function (ms) { setTimeout(snap, ms); });
+})();
+</script>
+        """,
+        height=0,
+        width=0,
+    )
 
 def render_staging_area():
     """Review pending Shadow/Harvest proposals inside the GateWai tab (not above it).
