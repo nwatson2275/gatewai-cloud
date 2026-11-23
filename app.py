@@ -547,8 +547,7 @@ def render_project_chat(height, earlier_key):
         for message in shown:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-    # Pin only the chat pane (never the page — that left the Editor tab at the bottom).
-    snap_chat_panes_to_bottom()
+    # Native container autoscroll only. JS page snaps raced the Editor and left it at the bottom.
     return box
 
 def is_mobile_client():
@@ -592,67 +591,59 @@ def chat_history_container(height):
 
 
 def request_chat_autoscroll():
-    """Mark that the next paint should JS-snap the chat pane to the end."""
-    st.session_state.chat_autoscroll = True
+    """No-op kept for call sites — chat pane uses container autoscroll=True."""
+    st.session_state.pop("chat_autoscroll", None)
 
 
 def snap_chat_panes_to_bottom(force=False):
-    """Scroll only the fixed-height chat pane to the latest message.
+    """No-op: JS snaps were scrolling the app shell and fighting the Editor tab."""
+    return
 
-    Never scrolls section.main / the app shell — that was parking the Editor tab
-    at the bottom of the page.
+
+def pin_editor_tab_to_top():
+    """When the Editor tab is selected, keep the page at the top.
+
+    Only acts if the Editor tab is aria-selected — Streamlit still runs this
+    block while GateWai is open, and we must not yank chat/staging scroll.
     """
-    st.session_state.pop("chat_autoscroll", False)
     components.html(
         """
 <script>
 (function () {
   const doc = window.parent.document;
-  const PAGE_BLOCKLIST = [
-    'section.main',
-    '[data-testid="stAppViewContainer"]',
-    '[data-testid="stAppScrollToBottomContainer"]',
-    '[data-testid="stMain"]',
-    '[data-testid="stHeader"]',
-    'html',
-    'body'
-  ];
-  function isPageScroller(el) {
-    if (!el || !el.matches) return true;
-    for (let i = 0; i < PAGE_BLOCKLIST.length; i++) {
-      try { if (el.matches(PAGE_BLOCKLIST[i])) return true; } catch (e) {}
+  function editorTabActive() {
+    const tabs = doc.querySelectorAll('button[role="tab"], [role="tab"]');
+    for (let i = 0; i < tabs.length; i++) {
+      const t = tabs[i];
+      const label = (t.textContent || '').toLowerCase();
+      if (label.indexOf('editor') === -1) continue;
+      if (t.getAttribute('aria-selected') === 'true') return true;
+      if (t.getAttribute('aria-selected') === true) return true;
+      if ((t.className || '').toString().indexOf('selected') >= 0) return true;
     }
-    // Huge viewports are the page, not the chat box.
-    if (el.clientHeight > (window.parent.innerHeight * 0.85)) return true;
     return false;
   }
-  function snap() {
-    const root = doc.querySelector('section.main') || doc;
-    const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
-    if (!msgs.length) return;
-    // Prefer the last message inside a height-limited block (our chat pane).
-    const last = msgs[msgs.length - 1];
-    let el = last.parentElement;
-    while (el && el !== doc.body) {
-      if (isPageScroller(el)) {
-        el = el.parentElement;
-        continue;
-      }
-      const style = window.parent.getComputedStyle(el);
-      const oy = style.overflowY;
-      const scrollable = (oy === 'auto' || oy === 'scroll' || oy === 'overlay')
-        || (el.scrollHeight > el.clientHeight + 8);
-      if (scrollable && el.clientHeight > 40 && el.clientHeight < window.parent.innerHeight * 0.85) {
-        try { el.style.scrollBehavior = 'auto'; } catch (e) {}
-        el.scrollTop = el.scrollHeight;
-        return;
-      }
-      el = el.parentElement;
-    }
+  function toTop() {
+    if (!editorTabActive()) return;
+    const targets = [
+      doc.scrollingElement || doc.documentElement,
+      doc.body,
+      doc.querySelector('[data-testid="stAppScrollToBottomContainer"]'),
+      doc.querySelector('section.main'),
+      doc.querySelector('[data-testid="stMain"]'),
+      doc.querySelector('[data-testid="stAppViewContainer"]')
+    ];
+    targets.forEach(function (el) {
+      if (!el) return;
+      try { el.scrollTop = 0; } catch (e) {}
+    });
+    try { window.parent.scrollTo(0, 0); } catch (e) {}
   }
-  snap();
-  requestAnimationFrame(snap);
-  [50, 150, 350, 700].forEach(function (ms) { setTimeout(snap, ms); });
+  toTop();
+  requestAnimationFrame(toTop);
+  [50, 100, 200, 400, 800, 1200, 1800, 2500].forEach(function (ms) {
+    setTimeout(toTop, ms);
+  });
 })();
 </script>
         """,
@@ -6027,27 +6018,7 @@ with main_tab_chat:
 # TAB 2: EDITOR (The Integrated IDE)
 # =========================================================
 with main_tab_editor:
-    # Chat snap must never leave this tab scrolled to the bottom of the page.
-    components.html(
-        """
-<script>
-(function () {
-  const doc = window.parent.document;
-  function toTop(el) {
-    if (!el) return;
-    try { el.scrollTop = 0; } catch (e) {}
-  }
-  toTop(doc.scrollingElement || doc.documentElement);
-  toTop(doc.body);
-  toTop(doc.querySelector('[data-testid="stAppScrollToBottomContainer"]'));
-  toTop(doc.querySelector('section.main'));
-  toTop(doc.querySelector('[data-testid="stMain"]'));
-})();
-</script>
-        """,
-        height=0,
-        width=0,
-    )
+    pin_editor_tab_to_top()
     # --- [NEW] Toggle for File List Visibility ---
     show_file_list = st.checkbox("📂 Show File List", value=st.session_state.get('show_file_list', False), help="Toggle visibility of the file list to maximize editor space.")
     if show_file_list != st.session_state.get('show_file_list', False):
