@@ -444,86 +444,189 @@ st.markdown(
 )
 
 
-def install_mobile_resume_guard():
-    """After phone lock/unlock, Streamlit can leave a pale duplicate GateWai/Editor UI.
+_CHAT_DRAFT_COOKIE = "gatewai_chat_draft"
+_CHAT_DRAFT_LS = "gatewai_chat_draft"
 
-    Reload once when returning from background (or bfcache), or when two main tab
-    bars are detected — avoids the stacked ghost screen without touching desktop.
+
+def read_chat_draft_cookie():
+    """Draft saved before a mobile reload (cookie is available on the next request)."""
+    try:
+        cookies = getattr(st.context, "cookies", None)
+        if cookies is None:
+            return ""
+        raw = ""
+        if hasattr(cookies, "get"):
+            raw = str(cookies.get(_CHAT_DRAFT_COOKIE) or "")
+        if not raw:
+            return ""
+        from urllib.parse import unquote
+
+        return unquote(raw).strip()
+    except Exception:
+        return ""
+
+
+def install_mobile_resume_guard():
+    """Mobile lock/unlock: keep chat draft + clear pale duplicate UI without wiping the box.
+
+    - Autosave the chat textarea to localStorage (and a short cookie before reload)
+    - Restore into the box after reconnect
+    - Only full-reload when a ghost double GateWai/Editor UI is detected (not on every wake)
     """
     components.html(
-        """
+        f"""
 <script>
-(function () {
+(function () {{
   const w = window.parent;
   const doc = w.document;
   const FLAG = '__gatewaiMobileResumeGuard';
   if (doc.documentElement[FLAG]) return;
   doc.documentElement[FLAG] = true;
 
-  const HIDDEN_MS = 12000;
-  let hiddenAt = 0;
+  const LS_KEY = '{_CHAT_DRAFT_LS}';
+  const COOKIE = '{_CHAT_DRAFT_COOKIE}';
   let reloading = false;
 
-  function isMobile() {
-    try {
+  function isMobile() {{
+    try {{
       return /Android|iPhone|iPad|iPod|Mobile/i.test(w.navigator.userAgent || '');
-    } catch (e) {
+    }} catch (e) {{
       return false;
-    }
-  }
+    }}
+  }}
 
-  function hasDoubleMainTabs() {
+  function chatTextarea() {{
+    return doc.querySelector('[data-testid="stChatInput"] textarea');
+  }}
+
+  function saveDraft(text) {{
+    try {{
+      if (text && String(text).trim()) {{
+        w.localStorage.setItem(LS_KEY, String(text));
+      }} else {{
+        w.localStorage.removeItem(LS_KEY);
+      }}
+    }} catch (e) {{}}
+  }}
+
+  function readDraft() {{
+    try {{ return w.localStorage.getItem(LS_KEY) || ''; }} catch (e) {{ return ''; }}
+  }}
+
+  function saveDraftFromDom() {{
+    const ta = chatTextarea();
+    if (!ta) return;
+    saveDraft(ta.value || '');
+  }}
+
+  function writeDraftCookie(text) {{
+    try {{
+      const max = 3000;
+      const clipped = (text || '').length > max ? (text || '').slice(0, max) : (text || '');
+      const secure = w.location.protocol === 'https:' ? '; Secure' : '';
+      doc.cookie = COOKIE + '=' + encodeURIComponent(clipped) +
+        '; path=/; max-age=3600; SameSite=Lax' + secure;
+    }} catch (e) {{}}
+  }}
+
+  function clearDraftCookie() {{
+    try {{
+      doc.cookie = COOKIE + '=; path=/; max-age=0; SameSite=Lax';
+    }} catch (e) {{}}
+  }}
+
+  function setNativeTextareaValue(ta, value) {{
+    try {{
+      const proto = w.HTMLTextAreaElement && w.HTMLTextAreaElement.prototype;
+      const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set) desc.set.call(ta, value);
+      else ta.value = value;
+      ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
+      ta.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    }} catch (e) {{
+      try {{ ta.value = value; }} catch (e2) {{}}
+    }}
+  }}
+
+  function restoreDraftToBox() {{
+    const draft = readDraft();
+    if (!draft || !String(draft).trim()) return false;
+    const ta = chatTextarea();
+    if (!ta) return false;
+    if ((ta.value || '').trim()) return false;
+    setNativeTextareaValue(ta, draft);
+    return true;
+  }}
+
+  function hasDoubleMainTabs() {{
     const lists = doc.querySelectorAll('[role="tablist"]');
     let n = 0;
-    for (let i = 0; i < lists.length; i++) {
+    for (let i = 0; i < lists.length; i++) {{
       const t = (lists[i].textContent || '');
       if (t.indexOf('GateWai') >= 0 && t.indexOf('Editor') >= 0) n += 1;
-    }
+    }}
     if (n > 1) return true;
     const apps = doc.querySelectorAll('[data-testid="stAppViewContainer"]');
     return apps.length > 1;
-  }
+  }}
 
-  function softReload(reason) {
+  function softReload(reason) {{
     if (reloading) return;
-    if (!isMobile() && reason !== 'double-ui') return;
+    if (!isMobile() && reason.indexOf('double-ui') !== 0) return;
+    saveDraftFromDom();
+    writeDraftCookie(readDraft());
     reloading = true;
-    try {
+    try {{
       console.log('Gatewai resume guard reload:', reason);
       w.location.reload();
-    } catch (e) {
+    }} catch (e) {{
       reloading = false;
-    }
-  }
+    }}
+  }}
 
-  doc.addEventListener('visibilitychange', function () {
-    if (doc.visibilityState === 'hidden') {
-      hiddenAt = Date.now();
+  // Keep draft warm while typing / before lock.
+  doc.addEventListener('input', function (e) {{
+    const t = e.target;
+    if (!t || !t.closest || !t.closest('[data-testid="stChatInput"]')) return;
+    saveDraft(t.value || '');
+  }}, true);
+
+  doc.addEventListener('visibilitychange', function () {{
+    if (doc.visibilityState === 'hidden') {{
+      saveDraftFromDom();
+      writeDraftCookie(readDraft());
       return;
-    }
+    }}
     if (doc.visibilityState !== 'visible') return;
-    const away = hiddenAt ? (Date.now() - hiddenAt) : 0;
-    hiddenAt = 0;
-    if (away >= HIDDEN_MS) {
-      softReload('wake-' + away + 'ms');
-      return;
-    }
-    setTimeout(function () {
+    // Prefer restore over reload — waking always used to wipe the prompt box.
+    setTimeout(restoreDraftToBox, 200);
+    setTimeout(restoreDraftToBox, 600);
+    setTimeout(function () {{
       if (hasDoubleMainTabs()) softReload('double-ui');
-    }, 400);
-  });
+    }}, 500);
+  }});
 
-  w.addEventListener('pageshow', function (ev) {
-    if (ev && ev.persisted) softReload('bfcache');
-  });
+  w.addEventListener('pageshow', function (ev) {{
+    if (ev && ev.persisted) {{
+      writeDraftCookie(readDraft());
+      softReload('bfcache');
+    }} else {{
+      setTimeout(restoreDraftToBox, 250);
+      setTimeout(restoreDraftToBox, 800);
+    }}
+  }});
 
-  // Catch a ghost UI that appears without a visibility event.
-  setInterval(function () {
-    if (doc.visibilityState === 'visible' && hasDoubleMainTabs()) {
-      softReload('double-ui-poll');
-    }
-  }, 2500);
-})();
+  setInterval(function () {{
+    if (doc.visibilityState !== 'visible') return;
+    restoreDraftToBox();
+    if (hasDoubleMainTabs()) softReload('double-ui-poll');
+  }}, 2500);
+
+  // First paint after a reload that carried a cookie/localStorage draft.
+  setTimeout(restoreDraftToBox, 100);
+  setTimeout(restoreDraftToBox, 400);
+  setTimeout(restoreDraftToBox, 1000);
+}})();
 </script>
         """,
         height=0,
@@ -3583,12 +3686,26 @@ if dictation_notice:
 
 if "main_chat_input_nonce" not in st.session_state:
     st.session_state.main_chat_input_nonce = 0
+# Restore unsaved prompt text after mobile lock/reload (cookie written on hide/reload).
+if (
+    "pending_chat_dictation" not in st.session_state
+    and "pending_chat_draft" not in st.session_state
+    and not st.session_state.get("held_chat_prompt")
+    and not st.session_state.get("prompt_submit_in_flight")
+):
+    _cookie_draft = read_chat_draft_cookie()
+    if _cookie_draft:
+        st.session_state.pending_chat_draft = _cookie_draft
 # The key stays put on a normal send. Changing it at the start of a run
 # drops the submission the user just made, and the box comes back empty.
 if "pending_chat_dictation" in st.session_state:
     st.session_state.main_chat_input_nonce += 1
     chat_input_key = f"{MAIN_CHAT_INPUT_KEY}_{st.session_state.main_chat_input_nonce}"
     st.session_state[chat_input_key] = st.session_state.pop("pending_chat_dictation")
+elif "pending_chat_draft" in st.session_state:
+    st.session_state.main_chat_input_nonce += 1
+    chat_input_key = f"{MAIN_CHAT_INPUT_KEY}_{st.session_state.main_chat_input_nonce}"
+    st.session_state[chat_input_key] = st.session_state.pop("pending_chat_draft")
 else:
     chat_input_key = f"{MAIN_CHAT_INPUT_KEY}_{st.session_state.main_chat_input_nonce}"
 
@@ -3650,6 +3767,17 @@ if submitted is not None:
             st.session_state.prompt_submit_in_flight = True
             request_chat_autoscroll()
             write_pending_turn(typed)
+            # Clear mobile draft so unlock does not resurrect a sent prompt.
+            components.html(
+                f"""<script>
+try {{
+  window.parent.localStorage.removeItem('{_CHAT_DRAFT_LS}');
+  document.cookie = '{_CHAT_DRAFT_COOKIE}=; path=/; max-age=0; SameSite=Lax';
+}} catch (e) {{}}
+</script>""",
+                height=0,
+                width=0,
+            )
             if not isinstance(st.session_state.get("messages"), list):
                 st.session_state.messages = list(messages) if isinstance(messages, list) else []
             if not (
