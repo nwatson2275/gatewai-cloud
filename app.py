@@ -5,6 +5,8 @@ from google.genai import types
 import json
 import os
 import time
+import hmac
+import hashlib
 import markdown
 import portalocker
 import re
@@ -131,13 +133,83 @@ def apply_gatewai_seed_si_identity():
 
 apply_gatewai_seed_si_identity()
 
-# Cloud gate: when GATEWAI_PASSWORD is set (Render), require it once per session.
+# Cloud gate: when GATEWAI_PASSWORD is set (Render), require unlock.
 # Desktop without the env var stays open.
+# Auth is session-scoped AND cookie-backed so mobile reconnects don't bounce to login.
 _GATEWAI_PASSWORD = os.environ.get("GATEWAI_PASSWORD", "").strip()
+_GATEWAI_AUTH_COOKIE = "gatewai_vault"
+_GATEWAI_AUTH_TTL_SEC = 14 * 24 * 60 * 60
+
+
+def _gatewai_auth_token(password, ttl_sec=_GATEWAI_AUTH_TTL_SEC):
+    exp = int(time.time()) + int(ttl_sec)
+    payload = f"1|{exp}"
+    sig = hmac.new(password.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}|{sig}".encode("utf-8")).decode("ascii")
+
+
+def _gatewai_auth_token_valid(password, token):
+    if not password or not token:
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+        ver, exp_s, sig = raw.split("|", 2)
+        exp = int(exp_s)
+        if ver != "1" or exp < int(time.time()):
+            return False
+        payload = f"{ver}|{exp}"
+        expect = hmac.new(
+            password.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expect, sig)
+    except Exception:
+        return False
+
+
+def _read_gatewai_auth_cookie():
+    try:
+        cookies = getattr(st.context, "cookies", None)
+        if cookies is None:
+            return ""
+        if hasattr(cookies, "get"):
+            return str(cookies.get(_GATEWAI_AUTH_COOKIE) or "")
+        return str(cookies.get(_GATEWAI_AUTH_COOKIE, "") if isinstance(cookies, dict) else "")
+    except Exception:
+        return ""
+
+
+def _emit_gatewai_auth_cookie(token):
+    """Set durable unlock cookie in the browser (survives Streamlit session recycle)."""
+    if not token:
+        return
+    # Escape for JS string context
+    safe = token.replace("\\", "\\\\").replace('"', '\\"')
+    components.html(
+        f"""<script>
+(() => {{
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = "{_GATEWAI_AUTH_COOKIE}={safe}; path=/; max-age={_GATEWAI_AUTH_TTL_SEC}; SameSite=Lax" + secure;
+}})();
+</script>""",
+        height=0,
+    )
+
+
+def scrub_chat_hold():
+    """Clear in-flight prompt recovery so deletes/wipes don't resurrect text."""
+    st.session_state.pop("held_chat_prompt", None)
+    st.session_state.pop("unanswered_attempt", None)
+
+
 if _GATEWAI_PASSWORD:
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
     if not st.session_state.authenticated:
+        cookie_token = _read_gatewai_auth_cookie()
+        if _gatewai_auth_token_valid(_GATEWAI_PASSWORD, cookie_token):
+            st.session_state.authenticated = True
+            st.session_state._emit_auth_cookie = cookie_token
+            st.rerun()
         st.title("Gatewai")
         st.caption("Enter the vault password to continue.")
         with st.form("gatewai_login"):
@@ -146,10 +218,18 @@ if _GATEWAI_PASSWORD:
         if submitted_login:
             if entered == _GATEWAI_PASSWORD:
                 st.session_state.authenticated = True
+                st.session_state._emit_auth_cookie = _gatewai_auth_token(_GATEWAI_PASSWORD)
                 st.rerun()
             else:
                 st.error("Incorrect password.")
         st.stop()
+    # Refresh/set cookie after unlock so mobile reconnects skip the login form.
+    emit_token = st.session_state.pop("_emit_auth_cookie", None)
+    if emit_token:
+        _emit_gatewai_auth_cookie(emit_token)
+    elif not _gatewai_auth_token_valid(_GATEWAI_PASSWORD, _read_gatewai_auth_cookie()):
+        st.session_state._emit_auth_cookie = _gatewai_auth_token(_GATEWAI_PASSWORD)
+        _emit_gatewai_auth_cookie(st.session_state.pop("_emit_auth_cookie"))
 
 # API Key Management - Initialize st.session_state.gemini_api_key if not present
 if 'gemini_api_key' not in st.session_state:
@@ -3060,8 +3140,10 @@ if submitted is not None:
                             hist_file,
                             indent=4,
                         )
-                except Exception:
-                    pass
+                        hist_file.flush()
+                        os.fsync(hist_file.fileno())
+                except Exception as e:
+                    print(f"ERROR: early history.json save failed: {e}")
 
 # --- 5. TOP COMMAND BAR (PROJECT MANAGER) ---
 st.caption(f"📍 Active Project: {st.session_state.active_project}")
@@ -4454,18 +4536,29 @@ with st.sidebar:
         st.markdown("---")
         st.caption("History Control")
         if st.button("↩️ Undo Last Turn (Scrub Error)", use_container_width=True):
-            if len(st.session_state.messages) >= 2:
-                # Remove last AI response
+            msgs = st.session_state.get("messages") or []
+            if len(msgs) >= 2:
+                # Remove last AI response + user prompt
                 st.session_state.messages.pop()
-                # Remove last User prompt
                 st.session_state.messages.pop()
-
-                # Commit the cleanup to disk immediately
-                save_state_dict = {k: st.session_state.get(k,'') for k in CORE_SCHEMA.values()}
+                scrub_chat_hold()
+                save_state_dict = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
                 save_state_dict["messages"] = st.session_state.messages
                 save_project_state(save_state_dict, st.session_state.active_project)
-
                 st.toast("Rewound history by 1 turn.")
+                st.rerun()
+            elif (
+                len(msgs) == 1
+                and isinstance(msgs[-1], dict)
+                and msgs[-1].get("role") == "user"
+            ):
+                # Lone unanswered prompt (common after mobile drop mid-reply)
+                st.session_state.messages.pop()
+                scrub_chat_hold()
+                save_state_dict = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
+                save_state_dict["messages"] = st.session_state.messages
+                save_project_state(save_state_dict, st.session_state.active_project)
+                st.toast("Discarded unanswered prompt.")
                 st.rerun()
             else:
                 st.warning("History is empty.")
@@ -4535,27 +4628,26 @@ with st.sidebar:
             user_turns.reverse()
 
             if user_turns:
-                # Select box shows the text, returns the Index tuple
+                # Select box shows the text, returns the (index, preview) tuple
                 selected_turn = st.selectbox(
                     "Select Turn to Delete:",
                     options=user_turns,
-                    format_func=lambda x: f"Turn {x}: {x}"
+                    format_func=lambda x: f"#{x[0]}: {x[1]}",
                 )
 
-                if st.button(f"✂️ Amputate Turn {selected_turn}", help="Deletes this User prompt AND the AI reply following it."):
-                    idx = selected_turn
+                if st.button(
+                    "✂️ Amputate Selected Turn",
+                    help="Deletes this User prompt AND the AI reply following it.",
+                ):
+                    idx = selected_turn[0] if isinstance(selected_turn, tuple) else selected_turn
 
-                    # Logic: Delete the User message at idx, AND the Model message at idx+1
-                    # We pop strictly by index. We pop the larger index first to avoid shifting problems.
-
-                    # Check if there is a following message (AI response)
+                    # Pop larger index first so earlier indices stay valid.
                     if idx + 1 < len(st.session_state.messages):
-                        st.session_state.messages.pop(idx + 1) # Pop AI Response
+                        st.session_state.messages.pop(idx + 1)
+                    st.session_state.messages.pop(idx)
+                    scrub_chat_hold()
 
-                    st.session_state.messages.pop(idx) # Pop User Prompt
-
-                    # Save State
-                    save_state_dict = {k: st.session_state.get(k,'') for k in CORE_SCHEMA.values()}
+                    save_state_dict = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
                     save_state_dict["messages"] = st.session_state.messages
                     save_project_state(save_state_dict, st.session_state.active_project)
 
@@ -4622,6 +4714,7 @@ with st.sidebar:
             if st.button("🧹 Wipe Chat Only"):
                 st.session_state.messages = []
                 st.session_state.last_harvest_message_index = 0 # <-- ADDED
+                scrub_chat_hold()
                 # Simple save to clear history on disk
                 save_state_dict = {k: st.session_state.get(k,'') for k in CORE_SCHEMA.values()}
                 save_state_dict["messages"] = []
@@ -4632,6 +4725,7 @@ with st.sidebar:
                 st.session_state.messages = []
                 st.session_state.last_harvest_message_index = 0 # <-- ADDED
                 st.session_state.temp_web_ctx = ""
+                scrub_chat_hold()
                 save_state_dict = {k: st.session_state.get(k,'') for k in CORE_SCHEMA.values()}
                 save_state_dict["messages"] = []
                 save_project_state(save_state_dict, st.session_state.active_project)
@@ -6166,6 +6260,8 @@ with main_tab_editor:
 # --- 9. LOGIC (DEBUG MODE - ROLE COUNTING & SHADOW SELECT) ---
 #print("DEBUG: About to enter the main input processing block.") # <-- ADD THIS LINE
 prompt = st.session_state.get("held_chat_prompt")
+# Do NOT auto-fire unanswered disk prompts after mobile reconnect/login.
+# Offer explicit Resume / Discard instead (prevents "erased prompt came back").
 if not prompt:
     pending_messages = st.session_state.get("messages") or []
     if (
@@ -6173,11 +6269,28 @@ if not prompt:
         and isinstance(pending_messages[-1], dict)
         and pending_messages[-1].get("role") == "user"
         and str(pending_messages[-1].get("content") or "").strip()
-        and st.session_state.get("unanswered_attempt") != len(pending_messages)
     ):
-        prompt = str(pending_messages[-1]["content"])
-        st.session_state.held_chat_prompt = prompt
-        st.session_state.unanswered_attempt = len(pending_messages)
+        trailing = str(pending_messages[-1]["content"])
+        preview = trailing if len(trailing) <= 180 else trailing[:180] + "…"
+        st.warning(
+            "Unanswered prompt on disk (often left behind when mobile reconnects mid-reply)."
+        )
+        st.caption(preview)
+        resume_col, discard_col = st.columns(2)
+        with resume_col:
+            if st.button("▶️ Resume unanswered prompt", use_container_width=True, key="resume_unanswered_btn"):
+                st.session_state.held_chat_prompt = trailing
+                st.session_state.unanswered_attempt = len(pending_messages)
+                st.rerun()
+        with discard_col:
+            if st.button("🗑️ Discard unanswered prompt", use_container_width=True, key="discard_unanswered_btn"):
+                st.session_state.messages.pop()
+                scrub_chat_hold()
+                save_state_dict = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
+                save_state_dict["messages"] = st.session_state.messages
+                save_project_state(save_state_dict, st.session_state.active_project)
+                st.toast("Discarded unanswered prompt.")
+                st.rerun()
 answered_already = False
 if prompt and len(st.session_state.get("messages") or []) >= 2:
     previous = st.session_state.messages[-2]
@@ -6191,7 +6304,7 @@ if prompt and len(st.session_state.get("messages") or []) >= 2:
         and str(latest.get("content") or "").strip()
     )
 if answered_already:
-    st.session_state.pop("held_chat_prompt", None)
+    scrub_chat_hold()
     prompt = None
 
 # Catch up auto-shadow if chat saved but the prior request died mid-shadow (common on mobile).
