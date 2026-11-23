@@ -400,8 +400,11 @@ st.markdown(
             margin-top: 15px; margin-bottom: 5px; font-weight: bold;
             color: #424242; border-bottom: 1px solid #e0e0e0;
         }
-        [data-testid="column"]:nth-child(2) [data-testid="stVerticalBlock"] {
-            height: 85vh; overflow-y: auto; border-left: 1px solid #e0e0e0; padding-left: 20px;
+        /* Desktop-only: do NOT apply on mobile — 85vh on column 2 unglues staging/chat after submit. */
+        @media (min-width: 769px) {
+            [data-testid="column"]:nth-child(2) [data-testid="stVerticalBlock"] {
+                height: 85vh; overflow-y: auto; border-left: 1px solid #e0e0e0; padding-left: 20px;
+            }
         }
         div.stButton > button:first-child { width: 100%; border-radius: 5px; }
         .purge-btn { border: 1px solid #ff4b4b; color: #ff4b4b; }
@@ -415,16 +418,20 @@ st.markdown(
         div[data-testid="stChatInput"] textarea::placeholder {
             color: #757575 !important;
         }
-        /* Mobile: keep chat usable after submit (debugger + tall panes were blowing the layout). */
         @media (max-width: 768px) {
-            section.main div[data-testid="stVerticalBlockBorderWrapper"][style*="height"] {
-                height: 52vh !important;
-                max-height: 52vh !important;
-            }
             section.main [data-testid="stExpander"] pre,
             section.main [data-testid="stExpander"] code {
                 max-height: 140px !important;
                 overflow: auto !important;
+            }
+            /* Hide zero-height component iframes that still break mobile flex layout */
+            section.main iframe[height="0"],
+            section.main iframe[height="1"] {
+                display: none !important;
+                position: absolute !important;
+                width: 0 !important;
+                height: 0 !important;
+                border: 0 !important;
             }
         }
     </style>
@@ -539,54 +546,251 @@ def render_project_chat(height, earlier_key):
     snap_chat_panes_to_bottom()
     return box
 
+def is_mobile_client():
+    """Best-effort User-Agent check (Streamlit mobile browser / PWA)."""
+    try:
+        headers = getattr(st.context, "headers", None)
+        if headers is None:
+            return False
+        ua = ""
+        if hasattr(headers, "get"):
+            ua = str(headers.get("User-Agent", "") or headers.get("user-agent", "") or "")
+        return any(
+            token in ua.lower()
+            for token in ("mobile", "android", "iphone", "ipod", "ipad", "webos", "iemobile")
+        )
+    except Exception:
+        return False
+
+
+def chat_pane_height(desktop=720, mobile=380):
+    """Shorter chat pane on phones so staging/proposals don't shove the UI apart."""
+    if st.session_state.get("pending_updates"):
+        mobile = min(mobile, 320)
+        desktop = min(desktop, 560)
+    return mobile if is_mobile_client() else desktop
+
+
 def chat_history_container(height):
     """Fixed-height chat pane. Disable Streamlit autoscroll (it animates through long history)."""
     kwargs = {"height": height}
     try:
         import inspect
         if "autoscroll" in inspect.signature(st.container).parameters:
-            # False = don't animate top→bottom; we snap instantly after render instead
+            # False = don't animate top→bottom through the whole history
             kwargs["autoscroll"] = False
     except Exception:
         pass
     return st.container(**kwargs)
 
 def snap_chat_panes_to_bottom():
-    """Jump chat panes to the latest message instantly (no smooth scroll-through).
+    """No-op: components.html iframes were ungluing Streamlit's mobile layout after submit.
 
-    Avoid scrollIntoView — on mobile it scrolls the whole page (often into the
-    Shadow Debugger) instead of the fixed-height chat pane.
+    Chat panes use a fixed-height container; users can scroll inside it. Revisit with a
+    non-iframe approach if auto-snap is needed again.
     """
-    components.html(
-        """
-<script>
-(function () {
-  const doc = window.parent.document;
-  function snap() {
-    const msgs = doc.querySelectorAll('[data-testid="stChatMessage"]');
-    if (!msgs.length) return;
-    const last = msgs[msgs.length - 1];
-    let el = last.parentElement;
-    while (el && el !== doc.body) {
-      const canScroll = el.scrollHeight > el.clientHeight + 8;
-      if (canScroll && el.clientHeight > 40) {
-        try { el.style.scrollBehavior = 'auto'; } catch (e) {}
-        el.scrollTop = el.scrollHeight;
-        break;
-      }
-      el = el.parentElement;
-    }
-  }
-  snap();
-  requestAnimationFrame(snap);
-  [0, 80, 200, 450, 900, 1400].forEach(function (ms) {
-    setTimeout(snap, ms);
-  });
-})();
-</script>
-        """,
-        height=1,
-    )
+    return
+
+def render_staging_area():
+    """Review pending Shadow/Harvest proposals inside the GateWai tab (not above it).
+
+    Sitting above the tabs made mobile look like a second dialog and, with the old
+    85vh column CSS + side-by-side diffs, unglued the whole page after proposals.
+    """
+    if "pending_updates" not in st.session_state or not st.session_state.pending_updates:
+        return
+
+    st.divider()
+    with st.container(border=True):
+        st.warning("🔔 **APPROVAL REQUIRED:** The AI has proposed changes to your Core Memory.")
+
+        slots_to_review = list(st.session_state.pending_updates.items())
+        if not slots_to_review:
+            st.success("All pending changes processed.")
+            if "pending_updates" in st.session_state:
+                del st.session_state.pending_updates
+            st.rerun()
+
+        narrow = is_mobile_client()
+        for slot_name, update_data in slots_to_review:
+            if isinstance(update_data, dict) and "content" in update_data:
+                new_content_str = update_data["content"]
+                is_suspect_staged = update_data.get("suspect", False)
+            else:
+                new_content_str = update_data
+                is_suspect_staged = False
+
+            if str(slot_name).startswith("__metadata_"):
+                continue
+
+            warning_icon = "🚩 " if is_suspect_staged else ""
+            if st.session_state.get("open_staged_proposal") != slot_name:
+                if st.button(
+                    f"{warning_icon}{slot_name}",
+                    key=f"open_proposal_{slot_name}",
+                    use_container_width=True,
+                ):
+                    st.session_state.open_staged_proposal = slot_name
+                    st.rerun()
+                continue
+
+            with st.container(border=True):
+                st.markdown(f"**{warning_icon}{slot_name}**")
+                if st.button("Close", key=f"close_proposal_{slot_name}"):
+                    st.session_state.open_staged_proposal = None
+                    st.rerun()
+
+                current_val = st.session_state.get(slot_name, "")
+                if not isinstance(current_val, str):
+                    current_val = str(current_val)
+
+                # Stack on mobile (side-by-side + 85vh CSS was destroying the layout).
+                if narrow:
+                    st.caption("❌ **CURRENT**")
+                    with st.container(height=160):
+                        st.code(current_val, language=get_code_language(str(current_val)), wrap_lines=True)
+                    st.caption("✅ **PROPOSED**")
+                    with st.container(height=160):
+                        st.code(new_content_str, language=get_code_language(new_content_str), wrap_lines=True)
+                else:
+                    col_current, col_proposed = st.columns(2)
+                    with col_current:
+                        st.caption("❌ **CURRENT VERSION** (In Database)")
+                        with st.container(height=280):
+                            st.code(current_val, language=get_code_language(str(current_val)), wrap_lines=True)
+                    with col_proposed:
+                        st.caption("✅ **PROPOSED VERSION** (From AI)")
+                        with st.container(height=280):
+                            st.code(new_content_str, language=get_code_language(new_content_str), wrap_lines=True)
+
+                b_col1, b_col2, b_col3 = st.columns([1, 1, 2] if narrow else [1, 1, 3])
+                if b_col1.button("✅ APPROVE", key=f"accept_{slot_name}", type="primary", use_container_width=True):
+                    commit_slot_text(slot_name, new_content_str, replaced_text=st.session_state.get(slot_name, ""))
+                    del st.session_state.pending_updates[slot_name]
+                    metadata_key = f"__metadata_{slot_name}"
+                    if metadata_key in st.session_state.pending_updates:
+                        meta_updates = st.session_state.pending_updates[metadata_key]
+                        if slot_name in st.session_state.loaded_slots_metadata and isinstance(meta_updates, dict):
+                            st.session_state.loaded_slots_metadata[slot_name].update(meta_updates)
+                        del st.session_state.pending_updates[metadata_key]
+                    save_state_dict = {}
+                    for core_key in CORE_SCHEMA.values():
+                        save_state_dict[core_key] = st.session_state.get(core_key, "")
+                    if "loaded_slots_metadata" in st.session_state:
+                        save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
+                        for user_key in st.session_state.loaded_slots_metadata.keys():
+                            if user_key not in CORE_SCHEMA.values():
+                                save_state_dict[user_key] = st.session_state.get(user_key, "")
+                    save_state_dict["messages"] = st.session_state.messages
+                    config_keys = [
+                        "chat_engine_set", "ingest_engine_set", "harvest_engine_set",
+                        "shadow_engine_set", "transcribe_engine_set", "selected_lens_name",
+                        "temp_val", "top_p_val", "memory_depth_val", "compaction_threshold",
+                        "last_harvest_message_index", "review_mode_active", "auto_shadow_active",
+                    ]
+                    for key in config_keys:
+                        save_state_dict[key] = st.session_state.get(key)
+                    save_project_state(save_state_dict, st.session_state.active_project, silent=True)
+                    if st.session_state.get("open_staged_proposal") == slot_name:
+                        st.session_state.open_staged_proposal = None
+                    st.toast(f"✅ Committed '{slot_name}' to database.")
+                    st.rerun()
+
+                if b_col2.button("❌ REJECT", key=f"reject_{slot_name}", use_container_width=True):
+                    del st.session_state.pending_updates[slot_name]
+                    metadata_key = f"__metadata_{slot_name}"
+                    if metadata_key in st.session_state.pending_updates:
+                        del st.session_state.pending_updates[metadata_key]
+                    if st.session_state.get("open_staged_proposal") == slot_name:
+                        st.session_state.open_staged_proposal = None
+                    st.toast(f"❌ Rejected update to {slot_name}")
+                    st.rerun()
+
+        primary_count = sum(
+            1 for k in st.session_state.get("pending_updates", {})
+            if not str(k).startswith("__metadata_")
+        )
+        st.caption(f"Pending proposals: {primary_count}")
+        st.markdown("---")
+        col_reject_all, col_spacer, col_accept_all = st.columns([1, 1, 1] if narrow else [1, 2, 1])
+        has_primary_pending_updates = primary_count > 0
+        buttons_disabled = not has_primary_pending_updates
+
+        with col_reject_all:
+            if st.button(
+                "❌ Reject All",
+                use_container_width=True,
+                key="reject_all_proposals_btn",
+                disabled=buttons_disabled,
+                help="Reject all pending proposals in the Staging Area.",
+            ):
+                if "pending_updates" in st.session_state:
+                    primary_slot_names_to_delete = [
+                        key for key in list(st.session_state.pending_updates.keys())
+                        if not key.startswith("__metadata_")
+                    ]
+                    for slot_name in primary_slot_names_to_delete:
+                        st.session_state.pending_updates.pop(slot_name, None)
+                        st.session_state.pending_updates.pop(f"__metadata_{slot_name}", None)
+                st.session_state.open_staged_proposal = None
+                persist_pending_updates_now()
+                st.toast("All pending proposals rejected.")
+                st.rerun()
+
+        with col_accept_all:
+            if st.button(
+                "✅ Accept All",
+                use_container_width=True,
+                key="accept_all_proposals_btn",
+                type="primary",
+                disabled=buttons_disabled,
+                help="Approve and commit all pending proposals to the database.",
+            ):
+                primary_slot_names_to_accept = [
+                    key for key in list(st.session_state.pending_updates.keys())
+                    if not key.startswith("__metadata_")
+                ]
+                for slot_name in primary_slot_names_to_accept:
+                    update_data = st.session_state.pending_updates.get(slot_name)
+                    if update_data is None:
+                        continue
+                    if isinstance(update_data, dict) and "content" in update_data:
+                        new_content_str = update_data["content"]
+                    else:
+                        new_content_str = update_data
+                    commit_slot_text(slot_name, new_content_str, replaced_text=st.session_state.get(slot_name, ""))
+                    metadata_key = f"__metadata_{slot_name}"
+                    if metadata_key in st.session_state.pending_updates:
+                        meta_updates = st.session_state.pending_updates[metadata_key]
+                        if slot_name in st.session_state.loaded_slots_metadata and isinstance(meta_updates, dict):
+                            st.session_state.loaded_slots_metadata[slot_name].update(meta_updates)
+                        del st.session_state.pending_updates[metadata_key]
+                    del st.session_state.pending_updates[slot_name]
+
+                save_state_dict = {}
+                for core_key in CORE_SCHEMA.values():
+                    save_state_dict[core_key] = st.session_state.get(core_key, "")
+                if "loaded_slots_metadata" in st.session_state:
+                    save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
+                    for user_key in st.session_state.loaded_slots_metadata.keys():
+                        if user_key not in CORE_SCHEMA.values():
+                            save_state_dict[user_key] = st.session_state.get(user_key, "")
+                save_state_dict["messages"] = st.session_state.messages
+                config_keys = [
+                    "chat_engine_set", "ingest_engine_set", "harvest_engine_set",
+                    "shadow_engine_set", "transcribe_engine_set", "selected_lens_name",
+                    "temp_val", "top_p_val", "memory_depth_val", "compaction_threshold",
+                    "last_harvest_message_index", "review_mode_active", "auto_shadow_active",
+                ]
+                for key in config_keys:
+                    save_state_dict[key] = st.session_state.get(key)
+                save_project_state(save_state_dict, st.session_state.active_project, silent=True)
+                if "pending_updates" in st.session_state and not st.session_state.pending_updates:
+                    del st.session_state.pending_updates
+                st.session_state.open_staged_proposal = None
+                st.toast("✅ All pending proposals accepted and committed to database.")
+                st.rerun()
+
 
 def persist_slot_folder(slot_name, folder):
     """Write a folder label onto a user slot in RAM + SQLite. Returns True if the value changed."""
@@ -2677,7 +2881,9 @@ def run_auto_shadow_turn(temp_val=None, top_p_val=None):
                     shadow_logs.append(
                         f"📝 STAGED: {k} queued for review (Review Mode ON or Suspect)."
                     )
-                    st.toast(f"Shadow proposed update to {k}")
+                    # Skip per-slot toasts on mobile — they shove the viewport after submit.
+                    if not is_mobile_client():
+                        st.toast(f"Shadow proposed update to {k}")
                     any_staged = True
                 elif not is_review_active and ai_managed and not is_suspect_from_shadow:
                     proj_db = db.get_project_db_path(BASE_PROJECT_DIR, st.session_state.active_project)
@@ -5574,220 +5780,7 @@ if st.session_state.get("harvest_result") or st.session_state.get("harvest_error
             st.session_state.harvest_result = None
             st.rerun()
 
-# [NEW LOCATION] 🚨 STAGING AREA (Wide Screen & Prominent)
-#print("DEBUG: About to check staging.") # <-- ADD THIS LINE
-if "pending_updates" in st.session_state and st.session_state.pending_updates:
-    print("DEBUG: Inside staging.") # <-- ADD THIS LINE
-    st.divider()
-    with st.container(border=True):
-        st.warning("🔔 **APPROVAL REQUIRED:** The AI has proposed changes to your Core Memory.")
-
-        # Check if we have items to review
-        slots_to_review = list(st.session_state.pending_updates.items())
-
-        if not slots_to_review:
-            st.success("All pending changes processed.")
-            # Ensure pending_updates is truly deleted if it's empty
-            if "pending_updates" in st.session_state:
-                del st.session_state.pending_updates
-            st.rerun() # <--- CRITICAL: This must be here to force the UI to reflect the empty state.
-
-
-        for slot_name, update_data in slots_to_review: # Renamed 'new_content' to 'update_data'
-            # --- NEW: Extract content and suspect flag from update_data ---
-            if isinstance(update_data, dict) and "content" in update_data:
-                new_content_str = update_data["content"]
-                is_suspect_staged = update_data.get("suspect", False)
-            else:
-                # Fallback for older format or direct content strings (shouldn't happen from Shadow now)
-                new_content_str = update_data
-                is_suspect_staged = False
-            # --- END NEW ---
-
-            if str(slot_name).startswith("__metadata_"):
-                continue
-
-            warning_icon = "🚩 " if is_suspect_staged else ""
-            # Streamlit runs expander bodies even when closed, and these files are
-            # large enough to kill the run before the chat box is read.
-            if st.session_state.get("open_staged_proposal") != slot_name:
-                if st.button(
-                    f"{warning_icon}{slot_name}",
-                    key=f"open_proposal_{slot_name}",
-                    use_container_width=True,
-                ):
-                    st.session_state.open_staged_proposal = slot_name
-                    st.rerun()
-                continue
-            with st.container(border=True):
-                st.markdown(f"**{warning_icon}{slot_name}**")
-                if st.button("Close", key=f"close_proposal_{slot_name}"):
-                    st.session_state.open_staged_proposal = None
-                    st.rerun()
-                # VISUAL DIFF (Now uses Full Screen Width!)
-                col_current, col_proposed = st.columns(2)
-
-                current_val = st.session_state.get(slot_name, "")
-                # Safety conversions - now new_content_str is guaranteed to be a string
-                if not isinstance(current_val, str): current_val = str(current_val)
-
-                with col_current:
-                    st.caption("❌ **CURRENT VERSION** (In Database)")
-                    # Use a specific height to make it scrollable but visible
-                    st.code(current_val, language=get_code_language(str(current_val)), wrap_lines=True)
-
-                with col_proposed:
-                    st.caption("✅ **PROPOSED VERSION** (From AI)")
-                    st.code(new_content_str, language=get_code_language(new_content_str), wrap_lines=True) # Use new_content_str
-
-                # ACTION BUTTONS (Wide & Easy to Click)
-                b_col1, b_col2, b_col3 = st.columns([1,1,3]) # <--- CRITICAL: Set to 3 columns to match the number of buttons
-
-                # Accept Button (Green)
-                if b_col1.button("✅ APPROVE CHANGE", key=f"accept_{slot_name}", type="primary", use_container_width=True):
-                    # 1. Commit content change to session state
-                    commit_slot_text(slot_name, new_content_str, replaced_text=st.session_state.get(slot_name, ""))
-                    del st.session_state.pending_updates[slot_name]
-
-                    # 2. [NEW] Check for and commit associated metadata changes
-                    metadata_key = f"__metadata_{slot_name}"
-                    if metadata_key in st.session_state.pending_updates:
-                        meta_updates = st.session_state.pending_updates[metadata_key]
-                        if slot_name in st.session_state.loaded_slots_metadata and isinstance(meta_updates, dict):
-                            st.session_state.loaded_slots_metadata[slot_name].update(meta_updates)
-                        del st.session_state.pending_updates[metadata_key]
-
-                    # 3. Build a COMPLETE snapshot of the entire current project state for saving.
-                    save_state_dict = {}
-                    for core_key in CORE_SCHEMA.values():
-                        save_state_dict[core_key] = st.session_state.get(core_key, '')
-                    if "loaded_slots_metadata" in st.session_state:
-                        save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
-                        for user_key in st.session_state.loaded_slots_metadata.keys():
-                            if user_key not in CORE_SCHEMA.values():
-                                save_state_dict[user_key] = st.session_state.get(user_key, '')
-                    save_state_dict["messages"] = st.session_state.messages
-                    config_keys = ["chat_engine_set", "ingest_engine_set", "harvest_engine_set", "shadow_engine_set", "transcribe_engine_set",
-                                "selected_lens_name", "temp_val", "top_p_val", "memory_depth_val", "compaction_threshold", "last_harvest_message_index", "review_mode_active", "auto_shadow_active"]
-                    for key in config_keys:
-                        save_state_dict[key] = st.session_state.get(key)
-
-                    # 4. Save the complete state snapshot to the database.
-                    save_project_state(save_state_dict, st.session_state.active_project, silent=True)
-
-                    if st.session_state.get("open_staged_proposal") == slot_name:
-                        st.session_state.open_staged_proposal = None
-                    st.toast(f"✅ Committed '{slot_name}' to database.")
-                    st.rerun()
-
-                # Reject Button (Red)
-                if b_col2.button("❌ REJECT", key=f"reject_{slot_name}", use_container_width=True):
-                    del st.session_state.pending_updates[slot_name]
-                    # --- NEW: Also delete associated metadata if it exists ---
-                    metadata_key = f"__metadata_{slot_name}"
-                    if metadata_key in st.session_state.pending_updates:
-                        del st.session_state.pending_updates[metadata_key]
-                    # --- END NEW ---
-                    if st.session_state.get("open_staged_proposal") == slot_name:
-                        st.session_state.open_staged_proposal = None
-                    st.toast(f"❌ Rejected update to {slot_name}")
-                    st.rerun()
-
-        st.info(f"Pending Items: {len(slots_to_review)}")
-
-        # --- NEW: Accept All / Reject All Buttons ---
-        st.markdown("---") # Visual separator for the action buttons
-        # Use columns to position Reject All on the left and Accept All on the far right
-        col_reject_all, col_spacer, col_accept_all = st.columns([1,2,1]) # <--- CRITICAL: Set to 3 columns
-
-        # Determine if buttons should be disabled based on actual pending items (excluding metadata)
-        has_primary_pending_updates = any(not key.startswith('__metadata_') for key in st.session_state.get('pending_updates', {}).keys())
-        buttons_disabled = not has_primary_pending_updates
-
-        with col_reject_all:
-            if st.button("❌ Reject All", use_container_width=True, key="reject_all_proposals_btn",
-                         disabled=buttons_disabled, help="Reject all pending proposals in the Staging Area."):
-                if "pending_updates" in st.session_state:
-                    # Get a list of only the *primary* slot names to process
-                    primary_slot_names_to_delete = [
-                        key for key in st.session_state.pending_updates.keys()
-                        if not key.startswith('__metadata_')
-                    ]
-
-                    for slot_name in primary_slot_names_to_delete:
-                        # Delete the primary slot
-                        if slot_name in st.session_state.pending_updates: # Defensive check
-                            del st.session_state.pending_updates[slot_name]
-
-                        # Delete its associated metadata slot, if it exists
-                        metadata_key = f"__metadata_{slot_name}"
-                        if metadata_key in st.session_state.pending_updates:
-                            del st.session_state.pending_updates[metadata_key]
-                # After processing, the pending_updates dict should be empty, or only contain metadata for rejected items.
-                st.toast("All pending proposals rejected.")
-                st.rerun() # Force a rerun to clear the UI immediately
-
-        with col_accept_all:
-            if st.button("✅ Accept All", use_container_width=True, key="accept_all_proposals_btn", type="primary",
-                         disabled=buttons_disabled, help="Approve and commit all pending proposals to the database."):
-                # Get a list of only the *primary* slot names to process
-                primary_slot_names_to_accept = [
-                    key for key in st.session_state.pending_updates.keys()
-                    if not key.startswith('__metadata_')
-                ]
-
-                for slot_name in primary_slot_names_to_accept:
-                    # Retrieve the update data for the primary slot
-                    update_data = st.session_state.pending_updates.get(slot_name)
-                    if update_data is None: # Should not happen if primary_slot_names_to_accept is correctly built
-                        continue
-
-                    # Extract content and suspect flag (similar to individual accept logic)
-                    if isinstance(update_data, dict) and "content" in update_data:
-                        new_content_str = update_data["content"]
-                    else:
-                        new_content_str = update_data # Fallback
-
-                    # 1. Commit content change to session state
-                    commit_slot_text(slot_name, new_content_str, replaced_text=st.session_state.get(slot_name, ""))
-
-                    # 2. Check for and commit associated metadata changes
-                    metadata_key = f"__metadata_{slot_name}"
-                    if metadata_key in st.session_state.pending_updates:
-                        meta_updates = st.session_state.pending_updates[metadata_key]
-                        if slot_name in st.session_state.loaded_slots_metadata and isinstance(meta_updates, dict):
-                            st.session_state.loaded_slots_metadata[slot_name].update(meta_updates)
-                        del st.session_state.pending_updates[metadata_key] # Remove metadata from pending_updates after processing
-
-                    # Remove the primary slot from pending_updates after processing
-                    del st.session_state.pending_updates[slot_name]
-
-                # 3. Build a COMPLETE snapshot of the entire current project state for saving.
-                save_state_dict = {}
-                for core_key in CORE_SCHEMA.values():
-                    save_state_dict[core_key] = st.session_state.get(core_key, '')
-                if "loaded_slots_metadata" in st.session_state:
-                    save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
-                    for user_key in st.session_state.loaded_slots_metadata.keys():
-                        if user_key not in CORE_SCHEMA.values():
-                            save_state_dict[user_key] = st.session_state.get(user_key, '')
-                save_state_dict["messages"] = st.session_state.messages
-                config_keys = ["chat_engine_set", "ingest_engine_set", "harvest_engine_set", "shadow_engine_set", "transcribe_engine_set",
-                               "selected_lens_name", "temp_val", "top_p_val", "memory_depth_val", "compaction_threshold", "last_harvest_message_index", "review_mode_active", "auto_shadow_active"]
-                for key in config_keys:
-                    save_state_dict[key] = st.session_state.get(key)
-
-                # 4. Save the complete state snapshot to the database.
-                save_project_state(save_state_dict, st.session_state.active_project, silent=True)
-
-                # Ensure pending_updates is truly deleted if it's empty after processing
-                if "pending_updates" in st.session_state and not st.session_state.pending_updates:
-                    del st.session_state.pending_updates
-
-
-                st.toast("✅ All pending proposals accepted and committed to database.")
-                st.rerun()
-        # --- END NEW ---
+# Staging Area renders inside GateWai via render_staging_area().
 
 # THE SPLIT-BRAIN INTERFACE
 main_tab_chat, main_tab_editor = st.tabs(["💬 GateWai", "📝 Editor"])
@@ -5800,8 +5793,13 @@ with main_tab_chat:
     # while a turn is in flight (restart "fixes" UI mainly by clearing this state).
     _turn_busy = bool(st.session_state.get("held_chat_prompt")) or bool(
         st.session_state.get("prompt_submit_in_flight")
-    ) or bool(read_pending_turn())
-    _use_preview_split = bool(st.session_state.show_preview) and not _turn_busy
+    ) or bool(read_pending_turn()) or bool(st.session_state.get("pending_updates"))
+    # Never split chat/preview on phones — two columns + staging unglues the page.
+    _use_preview_split = (
+        bool(st.session_state.show_preview)
+        and not _turn_busy
+        and not is_mobile_client()
+    )
     if _use_preview_split:
         col_chat, col_preview = st.columns(2)
     else:
@@ -5809,7 +5807,7 @@ with main_tab_chat:
         col_preview = None
 
     with col_chat:
-        chat_container = render_project_chat(900, "chat_earlier_main")
+        chat_container = render_project_chat(chat_pane_height(), "chat_earlier_main")
 
         # Keep send/resume UI inside the chat pane (not below the tabs — that looked
         # like a second dialogue and hid Thinking/errors away from the conversation).
@@ -5857,6 +5855,9 @@ with main_tab_chat:
                     save_project_state(_save, st.session_state.active_project)
                     st.toast("Discarded unanswered prompt.")
                     st.rerun()
+
+        # Staging lives here (same tab as chat) — not above the tabs.
+        render_staging_area()
 
         # Collapsed by default — an open debugger after submit was blowing mobile layout
         # and stealing scroll away from the chat pane.
