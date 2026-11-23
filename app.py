@@ -443,6 +443,97 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+
+def install_mobile_resume_guard():
+    """After phone lock/unlock, Streamlit can leave a pale duplicate GateWai/Editor UI.
+
+    Reload once when returning from background (or bfcache), or when two main tab
+    bars are detected — avoids the stacked ghost screen without touching desktop.
+    """
+    components.html(
+        """
+<script>
+(function () {
+  const w = window.parent;
+  const doc = w.document;
+  const FLAG = '__gatewaiMobileResumeGuard';
+  if (doc.documentElement[FLAG]) return;
+  doc.documentElement[FLAG] = true;
+
+  const HIDDEN_MS = 12000;
+  let hiddenAt = 0;
+  let reloading = false;
+
+  function isMobile() {
+    try {
+      return /Android|iPhone|iPad|iPod|Mobile/i.test(w.navigator.userAgent || '');
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function hasDoubleMainTabs() {
+    const lists = doc.querySelectorAll('[role="tablist"]');
+    let n = 0;
+    for (let i = 0; i < lists.length; i++) {
+      const t = (lists[i].textContent || '');
+      if (t.indexOf('GateWai') >= 0 && t.indexOf('Editor') >= 0) n += 1;
+    }
+    if (n > 1) return true;
+    const apps = doc.querySelectorAll('[data-testid="stAppViewContainer"]');
+    return apps.length > 1;
+  }
+
+  function softReload(reason) {
+    if (reloading) return;
+    if (!isMobile() && reason !== 'double-ui') return;
+    reloading = true;
+    try {
+      console.log('Gatewai resume guard reload:', reason);
+      w.location.reload();
+    } catch (e) {
+      reloading = false;
+    }
+  }
+
+  doc.addEventListener('visibilitychange', function () {
+    if (doc.visibilityState === 'hidden') {
+      hiddenAt = Date.now();
+      return;
+    }
+    if (doc.visibilityState !== 'visible') return;
+    const away = hiddenAt ? (Date.now() - hiddenAt) : 0;
+    hiddenAt = 0;
+    if (away >= HIDDEN_MS) {
+      softReload('wake-' + away + 'ms');
+      return;
+    }
+    setTimeout(function () {
+      if (hasDoubleMainTabs()) softReload('double-ui');
+    }, 400);
+  });
+
+  w.addEventListener('pageshow', function (ev) {
+    if (ev && ev.persisted) softReload('bfcache');
+  });
+
+  // Catch a ghost UI that appears without a visibility event.
+  setInterval(function () {
+    if (doc.visibilityState === 'visible' && hasDoubleMainTabs()) {
+      softReload('double-ui-poll');
+    }
+  }, 2500);
+})();
+</script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+install_mobile_resume_guard()
+
+
 # --- 1.2 TOOLS ---
 
 #google_search_tool = types.Tool(
