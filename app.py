@@ -766,9 +766,9 @@ def render_project_chat(height, earlier_key):
         for message in shown:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-    # Chat-pane-only snap after a new reply (never scrolls the page/Editor).
-    if st.session_state.pop("chat_autoscroll", False):
-        snap_chat_panes_to_bottom(force=True)
+    # Prefer Streamlit container autoscroll only — extra snap iframes after reply
+    # were contributing to mobile ghost UI. Flag still used as a hint for CSS/clients.
+    st.session_state.pop("chat_autoscroll", False)
     return box
 
 def is_mobile_client():
@@ -6210,9 +6210,57 @@ with main_tab_chat:
             and _chat_msgs[-1].get("role") == "model"
             and str(_chat_msgs[-1].get("content") or "").strip()
         ):
-            if st.button("⬇️ Jump to latest reply", use_container_width=True, key="jump_latest_chat_btn"):
-                request_chat_autoscroll()
-                st.rerun()
+            # Client-only jump — a Streamlit button+rerun was creating ghost UI on mobile.
+            components.html(
+                """
+<div style="margin:0 0 8px 0;">
+  <button id="gatewai-jump-latest"
+    style="width:100%;padding:10px 12px;border:1px solid #b71c1c;border-radius:6px;
+           background:#fff;color:#b71c1c;font:600 14px/1.2 system-ui,sans-serif;cursor:pointer;">
+    ⬇️ Jump to latest reply
+  </button>
+</div>
+<script>
+(function () {
+  const doc = window.parent.document;
+  const win = window.parent;
+  function snap() {
+    const root = doc.querySelector('section.main') || doc;
+    const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
+    if (!msgs.length) return;
+    const last = msgs[msgs.length - 1];
+    let el = last.parentElement;
+    while (el && el !== doc.body) {
+      if (el === doc.documentElement || el === doc.body) break;
+      if (el.matches && (
+        el.matches('section.main') ||
+        el.matches('[data-testid="stAppViewContainer"]') ||
+        el.matches('[data-testid="stAppScrollToBottomContainer"]') ||
+        el.matches('[data-testid="stMain"]')
+      )) { el = el.parentElement; continue; }
+      if (el.clientHeight > win.innerHeight * 0.85) { el = el.parentElement; continue; }
+      if (el.scrollHeight > el.clientHeight + 8 && el.clientHeight > 40) {
+        try { el.style.scrollBehavior = 'auto'; } catch (e) {}
+        el.scrollTop = el.scrollHeight;
+        return;
+      }
+      el = el.parentElement;
+    }
+  }
+  const btn = document.getElementById('gatewai-jump-latest');
+  if (btn) {
+    btn.onclick = function () {
+      snap();
+      setTimeout(snap, 50);
+      setTimeout(snap, 200);
+      setTimeout(snap, 500);
+    };
+  }
+})();
+</script>
+                """,
+                height=52,
+            )
         _pending_turn = read_pending_turn()
         _pending_prompt = str((_pending_turn or {}).get("prompt") or "").strip()
         _in_flight = bool(st.session_state.get("held_chat_prompt")) or bool(
