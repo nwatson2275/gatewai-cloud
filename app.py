@@ -424,6 +424,12 @@ st.markdown(
                 max-height: 140px !important;
                 overflow: auto !important;
             }
+            /* Keep the chat history pane scrollable on iOS after a model reply. */
+            section.main div[data-testid="stVerticalBlockBorderWrapper"][style*="height"] {
+                overflow-y: auto !important;
+                -webkit-overflow-scrolling: touch !important;
+                touch-action: pan-y !important;
+            }
         }
         /* Keep snap iframes out of flex flow — never display:none (Safari skips those scripts). */
         section.main iframe[height="0"],
@@ -760,7 +766,9 @@ def render_project_chat(height, earlier_key):
         for message in shown:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-    # Native container autoscroll only. JS page snaps raced the Editor and left it at the bottom.
+    # Chat-pane-only snap after a new reply (never scrolls the page/Editor).
+    if st.session_state.pop("chat_autoscroll", False):
+        snap_chat_panes_to_bottom(force=True)
     return box
 
 def is_mobile_client():
@@ -780,19 +788,16 @@ def is_mobile_client():
         return False
 
 
-def chat_pane_height(desktop=720, mobile=380):
-    """Shorter chat pane on phones so staging/proposals don't shove the UI apart."""
+def chat_pane_height(desktop=720, mobile=520):
+    """Taller mobile chat pane so a model reply is reachable without fighting page scroll."""
     if st.session_state.get("pending_updates"):
-        mobile = min(mobile, 320)
+        mobile = min(mobile, 420)
         desktop = min(desktop, 560)
     return mobile if is_mobile_client() else desktop
 
 
 def chat_history_container(height):
-    """Fixed-height chat pane pinned to the latest message.
-
-    Only the latest slice is shown (CHAT_VISIBLE_STEP), so always-on autoscroll is safe.
-    """
+    """Fixed-height chat pane pinned to the latest message."""
     kwargs = {"height": height}
     try:
         import inspect
@@ -804,13 +809,58 @@ def chat_history_container(height):
 
 
 def request_chat_autoscroll():
-    """No-op kept for call sites — chat pane uses container autoscroll=True."""
-    st.session_state.pop("chat_autoscroll", None)
+    """Ask the next chat render to JS-snap the chat pane to the latest message."""
+    st.session_state.chat_autoscroll = True
 
 
 def snap_chat_panes_to_bottom(force=False):
-    """No-op: JS snaps were scrolling the app shell and fighting the Editor tab."""
-    return
+    """Scroll only the fixed-height chat pane (not the page / Editor)."""
+    if not force and not st.session_state.get("chat_autoscroll"):
+        return
+    components.html(
+        """
+<script>
+(function () {
+  const doc = window.parent.document;
+  const win = window.parent;
+  function snap() {
+    const root = doc.querySelector('section.main') || doc;
+    const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
+    if (!msgs.length) return;
+    const last = msgs[msgs.length - 1];
+    let el = last.parentElement;
+    while (el && el !== doc.body) {
+      if (el === doc.documentElement || el === doc.body) break;
+      if (el.matches && (
+        el.matches('section.main') ||
+        el.matches('[data-testid="stAppViewContainer"]') ||
+        el.matches('[data-testid="stAppScrollToBottomContainer"]') ||
+        el.matches('[data-testid="stMain"]')
+      )) {
+        el = el.parentElement;
+        continue;
+      }
+      if (el.clientHeight > win.innerHeight * 0.85) {
+        el = el.parentElement;
+        continue;
+      }
+      if (el.scrollHeight > el.clientHeight + 8 && el.clientHeight > 40) {
+        try { el.style.scrollBehavior = 'auto'; } catch (e) {}
+        el.scrollTop = el.scrollHeight;
+        return;
+      }
+      el = el.parentElement;
+    }
+  }
+  snap();
+  requestAnimationFrame(snap);
+  [40, 120, 300, 700, 1400].forEach(function (ms) { setTimeout(snap, ms); });
+})();
+</script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 def pin_editor_tab_to_top():
@@ -6154,6 +6204,15 @@ with main_tab_chat:
             and str(_chat_msgs[-1].get("content") or "").strip()
         ):
             _trailing = str(_chat_msgs[-1]["content"])
+        if (
+            _chat_msgs
+            and isinstance(_chat_msgs[-1], dict)
+            and _chat_msgs[-1].get("role") == "model"
+            and str(_chat_msgs[-1].get("content") or "").strip()
+        ):
+            if st.button("⬇️ Jump to latest reply", use_container_width=True, key="jump_latest_chat_btn"):
+                request_chat_autoscroll()
+                st.rerun()
         _pending_turn = read_pending_turn()
         _pending_prompt = str((_pending_turn or {}).get("prompt") or "").strip()
         _in_flight = bool(st.session_state.get("held_chat_prompt")) or bool(
@@ -7096,22 +7155,16 @@ if prompt:
                     should_rerun = True
                     save_project_state(universal_save_state_dict, st.session_state.active_project, silent=True)
 
-                    # Durable marker before the (possibly long) shadow call so a
-                    # dropped mobile/proxy request can catch up on the next run.
+                    # Defer shadow to the NEXT run. Running it here (before rerun) kept
+                    # mobile stuck on the pre-reply UI so users couldn't scroll to the
+                    # model answer until a later glitch refreshed the page.
                     st.session_state.pending_auto_shadow = True
                     write_pending_shadow(len(st.session_state.messages))
                     set_shadow_debug_logs([
-                        "✅ Chat reply saved.",
-                        "🕵️ Starting auto-shadow…",
+                        "✅ Chat reply saved — refreshing so you can read it.",
+                        "🕵️ Auto-shadow will run right after that refresh.",
                     ])
-                    shadow_logs, any_staged_this_run, shadow_done = run_auto_shadow_turn(
-                        current_temp_val, current_top_p_val
-                    )
-                    set_shadow_debug_logs(shadow_logs)
-                    if shadow_done:
-                        mark_auto_shadow_complete()
-                    if any_staged_this_run:
-                        should_rerun = True
+                    request_chat_autoscroll()
 
         except Exception as e:
             st.session_state.chat_send_error = str(e)
