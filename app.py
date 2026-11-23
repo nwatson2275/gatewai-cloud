@@ -547,8 +547,8 @@ def render_project_chat(height, earlier_key):
         for message in shown:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-    # Native autoscroll + JS snap (flagged after send/reply, otherwise still pin to end).
-    snap_chat_panes_to_bottom(force=True)
+    # Pin only the chat pane (never the page — that left the Editor tab at the bottom).
+    snap_chat_panes_to_bottom()
     return box
 
 def is_mobile_client():
@@ -597,31 +597,52 @@ def request_chat_autoscroll():
 
 
 def snap_chat_panes_to_bottom(force=False):
-    """Scroll the fixed-height chat pane to the latest message (layout-safe iframe).
+    """Scroll only the fixed-height chat pane to the latest message.
 
-    Does not use scrollIntoView (that scrolls the whole mobile page). Only sets
-    scrollTop on the nearest scrollable ancestor of the last chat bubble.
+    Never scrolls section.main / the app shell — that was parking the Editor tab
+    at the bottom of the page.
     """
-    if not force and not st.session_state.get("chat_autoscroll"):
-        return
-    st.session_state.chat_autoscroll = False
+    st.session_state.pop("chat_autoscroll", False)
     components.html(
         """
 <script>
 (function () {
   const doc = window.parent.document;
+  const PAGE_BLOCKLIST = [
+    'section.main',
+    '[data-testid="stAppViewContainer"]',
+    '[data-testid="stAppScrollToBottomContainer"]',
+    '[data-testid="stMain"]',
+    '[data-testid="stHeader"]',
+    'html',
+    'body'
+  ];
+  function isPageScroller(el) {
+    if (!el || !el.matches) return true;
+    for (let i = 0; i < PAGE_BLOCKLIST.length; i++) {
+      try { if (el.matches(PAGE_BLOCKLIST[i])) return true; } catch (e) {}
+    }
+    // Huge viewports are the page, not the chat box.
+    if (el.clientHeight > (window.parent.innerHeight * 0.85)) return true;
+    return false;
+  }
   function snap() {
     const root = doc.querySelector('section.main') || doc;
     const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
     if (!msgs.length) return;
+    // Prefer the last message inside a height-limited block (our chat pane).
     const last = msgs[msgs.length - 1];
     let el = last.parentElement;
     while (el && el !== doc.body) {
+      if (isPageScroller(el)) {
+        el = el.parentElement;
+        continue;
+      }
       const style = window.parent.getComputedStyle(el);
       const oy = style.overflowY;
       const scrollable = (oy === 'auto' || oy === 'scroll' || oy === 'overlay')
         || (el.scrollHeight > el.clientHeight + 8);
-      if (scrollable && el.clientHeight > 40) {
+      if (scrollable && el.clientHeight > 40 && el.clientHeight < window.parent.innerHeight * 0.85) {
         try { el.style.scrollBehavior = 'auto'; } catch (e) {}
         el.scrollTop = el.scrollHeight;
         return;
@@ -631,7 +652,7 @@ def snap_chat_panes_to_bottom(force=False):
   }
   snap();
   requestAnimationFrame(snap);
-  [50, 150, 350, 700, 1200].forEach(function (ms) { setTimeout(snap, ms); });
+  [50, 150, 350, 700].forEach(function (ms) { setTimeout(snap, ms); });
 })();
 </script>
         """,
@@ -6006,6 +6027,27 @@ with main_tab_chat:
 # TAB 2: EDITOR (The Integrated IDE)
 # =========================================================
 with main_tab_editor:
+    # Chat snap must never leave this tab scrolled to the bottom of the page.
+    components.html(
+        """
+<script>
+(function () {
+  const doc = window.parent.document;
+  function toTop(el) {
+    if (!el) return;
+    try { el.scrollTop = 0; } catch (e) {}
+  }
+  toTop(doc.scrollingElement || doc.documentElement);
+  toTop(doc.body);
+  toTop(doc.querySelector('[data-testid="stAppScrollToBottomContainer"]'));
+  toTop(doc.querySelector('section.main'));
+  toTop(doc.querySelector('[data-testid="stMain"]'));
+})();
+</script>
+        """,
+        height=0,
+        width=0,
+    )
     # --- [NEW] Toggle for File List Visibility ---
     show_file_list = st.checkbox("📂 Show File List", value=st.session_state.get('show_file_list', False), help="Toggle visibility of the file list to maximize editor space.")
     if show_file_list != st.session_state.get('show_file_list', False):
