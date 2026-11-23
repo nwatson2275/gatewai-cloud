@@ -585,8 +585,7 @@ def snap_chat_panes_to_bottom():
 })();
 </script>
         """,
-        height=0,
-        width=0,
+        height=1,
     )
 
 def persist_slot_folder(slot_name, folder):
@@ -5797,10 +5796,17 @@ main_tab_chat, main_tab_editor = st.tabs(["💬 GateWai", "📝 Editor"])
 # TAB 1: GateWai (Chat & Artifacts)
 # =========================================================
 with main_tab_chat:
-    if st.session_state.show_preview:
-        col_chat, col_preview = st.columns(2) # <--- CRITICAL: Set to 2 columns
+    # Split preview crushes the chat pane on phones after submit; keep one column
+    # while a turn is in flight (restart "fixes" UI mainly by clearing this state).
+    _turn_busy = bool(st.session_state.get("held_chat_prompt")) or bool(
+        st.session_state.get("prompt_submit_in_flight")
+    ) or bool(read_pending_turn())
+    _use_preview_split = bool(st.session_state.show_preview) and not _turn_busy
+    if _use_preview_split:
+        col_chat, col_preview = st.columns(2)
     else:
-        col_chat = st.container(); col_preview = None
+        col_chat = st.container()
+        col_preview = None
 
     with col_chat:
         chat_container = render_project_chat(900, "chat_earlier_main")
@@ -5875,11 +5881,326 @@ with main_tab_chat:
                     st.code(str(_dbg_logs), wrap_lines=True)
                 else:
                     st.code("Waiting for input...", wrap_lines=True)
+
+        # --- 9. CHAT + AUTO-SHADOW (inside GateWai tab so Thinking/errors are not a second dialog) ---
+        prompt = st.session_state.get("held_chat_prompt")
+        # Silent auto-resume only (Resume/Discard UI is in this same tab).
+        if not prompt:
+            pending_messages = st.session_state.get("messages") or []
+            trailing = ""
+            if (
+                pending_messages
+                and isinstance(pending_messages[-1], dict)
+                and pending_messages[-1].get("role") == "user"
+                and str(pending_messages[-1].get("content") or "").strip()
+            ):
+                trailing = str(pending_messages[-1]["content"])
+            pending_turn = read_pending_turn()
+            pending_prompt = str((pending_turn or {}).get("prompt") or "").strip()
+            in_flight = bool(st.session_state.get("prompt_submit_in_flight")) or (
+                bool(pending_prompt) and (not trailing or pending_prompt == trailing)
+            )
+            if in_flight and (trailing or pending_prompt):
+                prompt = pending_prompt or trailing
+                st.session_state.held_chat_prompt = prompt
+                st.session_state.prompt_submit_in_flight = True
+                if not isinstance(st.session_state.get("messages"), list):
+                    st.session_state.messages = list(pending_messages) if pending_messages else []
+                if (
+                    st.session_state.messages
+                    and isinstance(st.session_state.messages[-1], dict)
+                    and st.session_state.messages[-1].get("role") == "user"
+                ):
+                    st.session_state.messages[-1]["content"] = prompt
+                else:
+                    st.session_state.messages.append({"role": "user", "content": prompt})
+                st.session_state.unanswered_attempt = len(st.session_state.messages)
+        answered_already = False
+        if prompt and len(st.session_state.get("messages") or []) >= 2:
+            previous = st.session_state.messages[-2]
+            latest = st.session_state.messages[-1]
+            answered_already = (
+                isinstance(previous, dict)
+                and isinstance(latest, dict)
+                and previous.get("role") == "user"
+                and previous.get("content") == prompt
+                and latest.get("role") == "model"
+                and str(latest.get("content") or "").strip()
+            )
+        if answered_already:
+            scrub_chat_hold()
+            prompt = None
+
+        should_rerun = False
+
+        # Catch up auto-shadow if chat saved but the prior request died mid-shadow (common on mobile).
+        if not prompt and needs_auto_shadow_catchup():
+            st.session_state.pending_auto_shadow = True
+            set_shadow_debug_logs(["🚦 Auto-shadow catch-up starting…"])
+            catchup_logs, catchup_staged, catchup_done = run_auto_shadow_turn()
+            set_shadow_debug_logs(catchup_logs)
+            if catchup_done:
+                mark_auto_shadow_complete()
+            if catchup_staged:
+                should_rerun = True
+
+        if prompt:
+            response = None
+            shadow_logs = set_shadow_debug_logs([
+                "🚦 Status: Chat submit received — calling model…",
+            ])
+
+            try:
+                last_message = st.session_state.messages[-1] if st.session_state.messages else None
+                already_stored = (
+                    isinstance(last_message, dict)
+                    and last_message.get("role") == "user"
+                    and last_message.get("content") == prompt
+                )
+                if not already_stored:
+                    # Do NOT draw into chat_container here — history already rendered above.
+                    # Extra st.chat_message calls create the mobile "dual dialog" until restart.
+                    if not st.session_state.ai_response_generated_for_current_turn:
+                        st.session_state.messages.append({"role": "user", "content": prompt})
+                st.session_state.req_count += 1
+
+                mem_depth = st.session_state.get('memory_depth_val', 3)
+                history_to_send = st.session_state.messages[-(mem_depth * 2 + 1):-1]
+                active_assets = sel_assets if 'sel_assets' in locals() else st.session_state.get('last_sel_assets', [])
+                _asset_dir = asset_dir if 'asset_dir' in locals() else os.path.join(
+                    BASE_PROJECT_DIR, st.session_state.active_project, "Assets"
+                )
+                injected_data = st.session_state.temp_web_ctx + "\n" + get_asset_content(active_assets, _asset_dir)
+
+                try:
+                    c_eng = chat_engine if 'chat_engine' in locals() else st.session_state.get('chat_engine_set', 'gemini-2.5-flash')
+                    chat_client = get_llm_client(c_eng)
+
+                    memory_block = ""
+                    manifest_rows = []
+                    context_files = []
+
+                    summary_content = st.session_state.get('MI_Master_Record_Summary', '')
+                    master_content = st.session_state.get('MI_Master_Record', '')
+
+                    if summary_content.strip():
+                        memory_block += f"\n{summary_content}\n\n"
+                        manifest_rows.append(f"| {'MI_Master_Record_Summary':<20} | CORE    | Summary of Source of Truth |")
+                        context_files.append("MI_Master_Record_Summary")
+                    elif master_content:
+                        memory_block += f"\n{master_content}\n\n"
+                        manifest_rows.append(f"| {'MI_Master_Record':<20} | CORE    | System Source of Truth |")
+                        context_files.append("MI_Master_Record")
+
+                    for key, slot_name in CORE_SCHEMA.items():
+                        if slot_name in ["MI_Master_Record", "MI_Master_Record_Summary"]:
+                            continue
+                        val = st.session_state.get(slot_name, "")
+                        if val:
+                            memory_block += f"\n{val}\n\n"
+                            manifest_rows.append(f"| {slot_name:<20} | CORE    | System Source of Truth |")
+                            context_files.append(slot_name)
+
+                    if "loaded_slots_metadata" in st.session_state:
+                        core_names = set(CORE_SCHEMA.values())
+                        for slot_name, meta in st.session_state.loaded_slots_metadata.items():
+                            if slot_name in core_names:
+                                continue
+                            is_active = meta.get('active_in_context', True)
+                            if not is_active:
+                                if slot_name.lower() in prompt.lower():
+                                    is_active = True
+                                    st.toast(f"🔦 Smart Fetch: {slot_name} (Name Match)")
+                                elif meta.get('description', '').strip() and meta['description'].lower() in prompt.lower():
+                                    is_active = True
+                                    st.toast(f"🔦 Smart Fetch: {slot_name} (Desc Match)")
+                            if not is_active:
+                                continue
+                            if meta.get('slot_type') == 'user':
+                                val = st.session_state.get(slot_name, "")
+                                desc = meta.get('description', 'User Attachment')
+                                manifest_rows.append(f"| {slot_name:<20} | USER    | {desc} |")
+                                if val:
+                                    memory_block += f"--- {slot_name} (USER FILE) ---\n{val}\n\n"
+                                    context_files.append(slot_name)
+
+                    manifest_table = (
+                        "--- MEMORY SLOT MANIFEST ---\n"
+                        "| SLOT NAME            | TYPE    | PURPOSE/CONTENT        |\n"
+                        "|----------------------|---------|------------------------|\n"
+                        + "\n".join(manifest_rows) + "\n"
+                    )
+
+                    sys_instr = (
+                        f"--- DOMAIN LENS ({st.session_state.selected_lens_name}) ---\n{st.session_state.domain_content}\n\n"
+                        f"{manifest_table}\n"
+                        f"\n{memory_block}\n"
+                        f"--- DATA STREAM ---\n{injected_data}\n\n"
+                        "INSTRUCTIONS:\n"
+                        "1. USE THE MANIFEST to understand the purpose of each file.\n"
+                        "2. 'SYSTEM CORE' files are your brain.\n"
+                        "3. 'USER FILES' are attachments. Read/Write/Delete them as requested.\n"
+                        "4. CRITICAL NEGATIVE CONSTRAINT: You are a conversational Co-Pilot. You MUST NOT propose any memory slot updates, output JSON for system changes, or attempt to directly modify the system state in your responses. All system updates are handled by other engines and the Staging Area.\n"
+                        "5. OUTPUT RULE: Do not output internal reasoning or 'scratchpad' thoughts. Respond DIRECTLY to the user.\n"
+                    )
+
+                    final_prompt = prompt
+                    print("DEBUG: final prompt completed.")
+                    st.session_state.role_stats["chat"] += 1
+
+                    if not st.session_state.ai_response_generated_for_current_turn:
+                        print("DEBUG: response_generated_for_current_turn=false.")
+                        chat = [
+                            {
+                                "role": "user" if m["role"] == "user" else "model",
+                                "parts": [{"text": m["content"]}]
+                            }
+                            for m in history_to_send
+                        ]
+                        chat.append({"role": "user", "parts": [{"text": final_prompt}]})
+
+                        current_temp_val = st.session_state.get('temp_val', 0.7)
+                        current_top_p_val = st.session_state.get('top_p_val', 0.9)
+                        try:
+                            set_shadow_debug_logs([
+                                "🚦 Calling chat model…",
+                                f"engine={c_eng}",
+                            ])
+                            with st.spinner("Thinking..."):
+                                chat_config_kwargs = {
+                                    "system_instruction": sys_instr,
+                                    "temperature": current_temp_val,
+                                    "top_p": current_top_p_val,
+                                }
+                                if not is_deepseek_engine(c_eng):
+                                    chat_config_kwargs["tools"] = [google_search_tool]
+                                response = chat_client.models.generate_content(
+                                    model=c_eng,
+                                    contents=chat,
+                                    config=types.GenerateContentConfig(**chat_config_kwargs)
+                                )
+
+                            st.session_state["harvest_in_progress"] = False
+                            st.session_state.ai_response_generated_for_current_turn = True
+
+                        except Exception as e:
+                            err_msg = str(e)
+                            error_detail = f"Error during AI send_message: {err_msg}"
+                            shadow_logs = set_shadow_debug_logs([
+                                "💀 Chat model call failed — auto-shadow not started.",
+                                f"CRASH: {err_msg}",
+                            ])
+                            print(f"ERROR: {error_detail}")
+                            st.session_state["harvest_in_progress"] = False
+                            st.session_state.chat_send_error = err_msg
+                            st.warning(f"AI call failed: {err_msg}")
+                            response = None
+
+                        if response:
+                            clean_text = response.text
+                            if clean_text is None:
+                                clean_text = ""
+                                print("WARNING: response.text was None, defaulting to empty string.")
+                            print(f"DEBUG: Current model response length: {len(clean_text)}")
+
+                            scrub_patterns = [
+                                r"^\s*\n*",
+                                r"✅ Approve\n",
+                                r"❌ Reject\n",
+                                r"## (MI_Master_Record|MI_Project_Status|MC_Frontier|MC_Assumptions|MC_Blindspots|MC_Focus|SI_Observed_Profile)\n+",
+                            ]
+                            for p in scrub_patterns:
+                                clean_text = re.sub(p, "", clean_text, flags=re.DOTALL)
+                            final_text = clean_text.strip()
+
+                            assimilation_marker_match = re.search(
+                                r'\*\(✅ (.*?) assimilated into Master Record\)\*', final_text
+                            )
+                            if assimilation_marker_match:
+                                consumed_content = assimilation_marker_match.group(1).strip()
+                                st.session_state.auto_deselect_list = [consumed_content]
+                                st.session_state.asset_selector_state_needs_update = True
+                                display_text = re.sub(
+                                    r'\*\(✅ (.*?) assimilated into Master Record\)\*',
+                                    '',
+                                    final_text,
+                                ).strip()
+                                st.session_state.MI_Master_Record += (
+                                    f"\n\n--- ASSIMILATED: {consumed_content} ---\n{display_text}"
+                                )
+                                final_text = display_text + f"\n\n*(✅ {consumed_content} assimilated into Master Record)*"
+                                if "WEB" == consumed_content:
+                                    st.session_state.temp_web_ctx = ""
+
+                            # Reply lives in session only this run; should_rerun rebuilds one clean chat pane.
+                            st.session_state.messages.append({"role": "model", "content": final_text})
+                            if st.session_state.get("held_chat_prompt") == prompt:
+                                st.session_state.pop("held_chat_prompt", None)
+                            st.session_state.prompt_submit_in_flight = False
+                            clear_pending_turn()
+                            print(f"DEBUG: Appending model response. Current messages length: {len(st.session_state.messages)}")
+
+                            universal_save_state_dict = {}
+                            for core_key in CORE_SCHEMA.values():
+                                universal_save_state_dict[core_key] = st.session_state.get(core_key, '')
+                            if "loaded_slots_metadata" in st.session_state:
+                                universal_save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
+                                for user_key in st.session_state.loaded_slots_metadata.keys():
+                                    if user_key not in CORE_SCHEMA.values() and user_key in st.session_state:
+                                        universal_save_state_dict[user_key] = st.session_state.get(user_key, '')
+                            universal_save_state_dict["messages"] = st.session_state.messages
+                            config_keys = [
+                                "chat_engine_set", "ingest_engine_set", "harvest_engine_set",
+                                "shadow_engine_set", "transcribe_engine_set",
+                                "selected_lens_name", "temp_val", "top_p_val", "memory_depth_val",
+                                "compaction_threshold", "last_harvest_message_index",
+                                "review_mode_active", "auto_shadow_active",
+                            ]
+                            for key in config_keys:
+                                universal_save_state_dict[key] = st.session_state.get(key)
+                            should_rerun = True
+                            save_project_state(universal_save_state_dict, st.session_state.active_project, silent=True)
+
+                            # Durable marker before the (possibly long) shadow call so a
+                            # dropped mobile/proxy request can catch up on the next run.
+                            st.session_state.pending_auto_shadow = True
+                            write_pending_shadow(len(st.session_state.messages))
+                            set_shadow_debug_logs([
+                                "✅ Chat reply saved.",
+                                "🕵️ Starting auto-shadow…",
+                            ])
+                            shadow_logs, any_staged_this_run, shadow_done = run_auto_shadow_turn(
+                                current_temp_val, current_top_p_val
+                            )
+                            set_shadow_debug_logs(shadow_logs)
+                            if shadow_done:
+                                mark_auto_shadow_complete()
+                            if any_staged_this_run:
+                                should_rerun = True
+
+                except Exception as e:
+                    st.error(f"System Error: {e}")
+                    set_shadow_debug_logs([f"System Crash: {e}"])
+
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "ResourceExhausted" in err_msg:
+                    set_shadow_debug_logs(["🚦 429 Quota Hit - Skipping Shadow."])
+                    st.warning("AI rate limit reached. Please try again in a moment.")
+                else:
+                    error_detail = f"Error during input processing: {err_msg}"
+                    set_shadow_debug_logs([f"💀 CRASH: {err_msg}"])
+                    print(f"ERROR: {error_detail}")
+                    st.warning("An unexpected error occurred. Please check the sidebar for logs or try again.")
+
+        if should_rerun:
+            st.rerun()
+
 #    print("after with col_chat") # <-- ADD THIS LINE
 
 
-    # Preview Column (Smart Renderer)
-    if col_preview and st.session_state.show_preview:
+    # Preview Column (Smart Renderer) — skipped while a chat turn is in flight
+    if col_preview and _use_preview_split:
         with col_preview:
             st.subheader("📋 Memory & Artifacts")
 
@@ -6472,329 +6793,3 @@ with main_tab_editor:
             except Exception as e:
                 st.error(f"Error reading file: {e}")
             pass
-
-# --- 9. CHAT + AUTO-SHADOW (after tabs so GateWai can paint before the API call) ---
-prompt = st.session_state.get("held_chat_prompt")
-# Silent auto-resume only (Resume/Discard UI lives in the chat tab above).
-if not prompt:
-    pending_messages = st.session_state.get("messages") or []
-    trailing = ""
-    if (
-        pending_messages
-        and isinstance(pending_messages[-1], dict)
-        and pending_messages[-1].get("role") == "user"
-        and str(pending_messages[-1].get("content") or "").strip()
-    ):
-        trailing = str(pending_messages[-1]["content"])
-    pending_turn = read_pending_turn()
-    pending_prompt = str((pending_turn or {}).get("prompt") or "").strip()
-    in_flight = bool(st.session_state.get("prompt_submit_in_flight")) or (
-        bool(pending_prompt) and (not trailing or pending_prompt == trailing)
-    )
-    if in_flight and (trailing or pending_prompt):
-        prompt = pending_prompt or trailing
-        st.session_state.held_chat_prompt = prompt
-        st.session_state.prompt_submit_in_flight = True
-        if not isinstance(st.session_state.get("messages"), list):
-            st.session_state.messages = list(pending_messages) if pending_messages else []
-        if (
-            st.session_state.messages
-            and isinstance(st.session_state.messages[-1], dict)
-            and st.session_state.messages[-1].get("role") == "user"
-        ):
-            st.session_state.messages[-1]["content"] = prompt
-        else:
-            st.session_state.messages.append({"role": "user", "content": prompt})
-        st.session_state.unanswered_attempt = len(st.session_state.messages)
-answered_already = False
-if prompt and len(st.session_state.get("messages") or []) >= 2:
-    previous = st.session_state.messages[-2]
-    latest = st.session_state.messages[-1]
-    answered_already = (
-        isinstance(previous, dict)
-        and isinstance(latest, dict)
-        and previous.get("role") == "user"
-        and previous.get("content") == prompt
-        and latest.get("role") == "model"
-        and str(latest.get("content") or "").strip()
-    )
-if answered_already:
-    scrub_chat_hold()
-    prompt = None
-
-should_rerun = False
-
-# Catch up auto-shadow if chat saved but the prior request died mid-shadow (common on mobile).
-if not prompt and needs_auto_shadow_catchup():
-    st.session_state.pending_auto_shadow = True
-    set_shadow_debug_logs(["🚦 Auto-shadow catch-up starting…"])
-    catchup_logs, catchup_staged, catchup_done = run_auto_shadow_turn()
-    set_shadow_debug_logs(catchup_logs)
-    if catchup_done:
-        mark_auto_shadow_complete()
-    if catchup_staged:
-        should_rerun = True
-
-if prompt:
-    response = None
-    shadow_logs = set_shadow_debug_logs([
-        "🚦 Status: Chat submit received — calling model…",
-    ])
-
-    try:
-        last_message = st.session_state.messages[-1] if st.session_state.messages else None
-        already_stored = (
-            isinstance(last_message, dict)
-            and last_message.get("role") == "user"
-            and last_message.get("content") == prompt
-        )
-        if not already_stored:
-            # Chat pane already rendered above; still draw here when the container exists
-            # so this run shows the user bubble before the model reply lands.
-            if "chat_container" in locals() and chat_container is not None:
-                with chat_container:
-                    with st.chat_message("user"):
-                        st.markdown(prompt)
-            if not st.session_state.ai_response_generated_for_current_turn:
-                st.session_state.messages.append({"role": "user", "content": prompt})
-        st.session_state.req_count += 1
-
-        mem_depth = st.session_state.get('memory_depth_val', 3)
-        history_to_send = st.session_state.messages[-(mem_depth * 2 + 1):-1]
-        active_assets = sel_assets if 'sel_assets' in locals() else st.session_state.get('last_sel_assets', [])
-        _asset_dir = asset_dir if 'asset_dir' in locals() else os.path.join(
-            BASE_PROJECT_DIR, st.session_state.active_project, "Assets"
-        )
-        injected_data = st.session_state.temp_web_ctx + "\n" + get_asset_content(active_assets, _asset_dir)
-
-        try:
-            c_eng = chat_engine if 'chat_engine' in locals() else st.session_state.get('chat_engine_set', 'gemini-2.5-flash')
-            chat_client = get_llm_client(c_eng)
-
-            memory_block = ""
-            manifest_rows = []
-            context_files = []
-
-            summary_content = st.session_state.get('MI_Master_Record_Summary', '')
-            master_content = st.session_state.get('MI_Master_Record', '')
-
-            if summary_content.strip():
-                memory_block += f"\n{summary_content}\n\n"
-                manifest_rows.append(f"| {'MI_Master_Record_Summary':<20} | CORE    | Summary of Source of Truth |")
-                context_files.append("MI_Master_Record_Summary")
-            elif master_content:
-                memory_block += f"\n{master_content}\n\n"
-                manifest_rows.append(f"| {'MI_Master_Record':<20} | CORE    | System Source of Truth |")
-                context_files.append("MI_Master_Record")
-
-            for key, slot_name in CORE_SCHEMA.items():
-                if slot_name in ["MI_Master_Record", "MI_Master_Record_Summary"]:
-                    continue
-                val = st.session_state.get(slot_name, "")
-                if val:
-                    memory_block += f"\n{val}\n\n"
-                    manifest_rows.append(f"| {slot_name:<20} | CORE    | System Source of Truth |")
-                    context_files.append(slot_name)
-
-            if "loaded_slots_metadata" in st.session_state:
-                core_names = set(CORE_SCHEMA.values())
-                for slot_name, meta in st.session_state.loaded_slots_metadata.items():
-                    if slot_name in core_names:
-                        continue
-                    is_active = meta.get('active_in_context', True)
-                    if not is_active:
-                        if slot_name.lower() in prompt.lower():
-                            is_active = True
-                            st.toast(f"🔦 Smart Fetch: {slot_name} (Name Match)")
-                        elif meta.get('description', '').strip() and meta['description'].lower() in prompt.lower():
-                            is_active = True
-                            st.toast(f"🔦 Smart Fetch: {slot_name} (Desc Match)")
-                    if not is_active:
-                        continue
-                    if meta.get('slot_type') == 'user':
-                        val = st.session_state.get(slot_name, "")
-                        desc = meta.get('description', 'User Attachment')
-                        manifest_rows.append(f"| {slot_name:<20} | USER    | {desc} |")
-                        if val:
-                            memory_block += f"--- {slot_name} (USER FILE) ---\n{val}\n\n"
-                            context_files.append(slot_name)
-
-            manifest_table = (
-                "--- MEMORY SLOT MANIFEST ---\n"
-                "| SLOT NAME            | TYPE    | PURPOSE/CONTENT        |\n"
-                "|----------------------|---------|------------------------|\n"
-                + "\n".join(manifest_rows) + "\n"
-            )
-
-            sys_instr = (
-                f"--- DOMAIN LENS ({st.session_state.selected_lens_name}) ---\n{st.session_state.domain_content}\n\n"
-                f"{manifest_table}\n"
-                f"\n{memory_block}\n"
-                f"--- DATA STREAM ---\n{injected_data}\n\n"
-                "INSTRUCTIONS:\n"
-                "1. USE THE MANIFEST to understand the purpose of each file.\n"
-                "2. 'SYSTEM CORE' files are your brain.\n"
-                "3. 'USER FILES' are attachments. Read/Write/Delete them as requested.\n"
-                "4. CRITICAL NEGATIVE CONSTRAINT: You are a conversational Co-Pilot. You MUST NOT propose any memory slot updates, output JSON for system changes, or attempt to directly modify the system state in your responses. All system updates are handled by other engines and the Staging Area.\n"
-                "5. OUTPUT RULE: Do not output internal reasoning or 'scratchpad' thoughts. Respond DIRECTLY to the user.\n"
-            )
-
-            final_prompt = prompt
-            print("DEBUG: final prompt completed.")
-            st.session_state.role_stats["chat"] += 1
-
-            if not st.session_state.ai_response_generated_for_current_turn:
-                print("DEBUG: response_generated_for_current_turn=false.")
-                chat = [
-                    {
-                        "role": "user" if m["role"] == "user" else "model",
-                        "parts": [{"text": m["content"]}]
-                    }
-                    for m in history_to_send
-                ]
-                chat.append({"role": "user", "parts": [{"text": final_prompt}]})
-
-                current_temp_val = st.session_state.get('temp_val', 0.7)
-                current_top_p_val = st.session_state.get('top_p_val', 0.9)
-                try:
-                    set_shadow_debug_logs([
-                        "🚦 Calling chat model…",
-                        f"engine={c_eng}",
-                    ])
-                    with st.spinner("Thinking..."):
-                        chat_config_kwargs = {
-                            "system_instruction": sys_instr,
-                            "temperature": current_temp_val,
-                            "top_p": current_top_p_val,
-                        }
-                        if not is_deepseek_engine(c_eng):
-                            chat_config_kwargs["tools"] = [google_search_tool]
-                        response = chat_client.models.generate_content(
-                            model=c_eng,
-                            contents=chat,
-                            config=types.GenerateContentConfig(**chat_config_kwargs)
-                        )
-
-                    st.session_state["harvest_in_progress"] = False
-                    st.session_state.ai_response_generated_for_current_turn = True
-
-                except Exception as e:
-                    err_msg = str(e)
-                    error_detail = f"Error during AI send_message: {err_msg}"
-                    shadow_logs = set_shadow_debug_logs([
-                        "💀 Chat model call failed — auto-shadow not started.",
-                        f"CRASH: {err_msg}",
-                    ])
-                    print(f"ERROR: {error_detail}")
-                    st.session_state["harvest_in_progress"] = False
-                    st.session_state.chat_send_error = err_msg
-                    st.warning(f"AI call failed: {err_msg}")
-                    response = None
-
-                if response:
-                    clean_text = response.text
-                    if clean_text is None:
-                        clean_text = ""
-                        print("WARNING: response.text was None, defaulting to empty string.")
-                    print(f"DEBUG: Current model response length: {len(clean_text)}")
-
-                    scrub_patterns = [
-                        r"^\s*\n*",
-                        r"✅ Approve\n",
-                        r"❌ Reject\n",
-                        r"## (MI_Master_Record|MI_Project_Status|MC_Frontier|MC_Assumptions|MC_Blindspots|MC_Focus|SI_Observed_Profile)\n+",
-                    ]
-                    for p in scrub_patterns:
-                        clean_text = re.sub(p, "", clean_text, flags=re.DOTALL)
-                    final_text = clean_text.strip()
-
-                    assimilation_marker_match = re.search(
-                        r'\*\(✅ (.*?) assimilated into Master Record\)\*', final_text
-                    )
-                    if assimilation_marker_match:
-                        consumed_content = assimilation_marker_match.group(1).strip()
-                        st.session_state.auto_deselect_list = [consumed_content]
-                        st.session_state.asset_selector_state_needs_update = True
-                        display_text = re.sub(
-                            r'\*\(✅ (.*?) assimilated into Master Record\)\*',
-                            '',
-                            final_text,
-                        ).strip()
-                        st.session_state.MI_Master_Record += (
-                            f"\n\n--- ASSIMILATED: {consumed_content} ---\n{display_text}"
-                        )
-                        final_text = display_text + f"\n\n*(✅ {consumed_content} assimilated into Master Record)*"
-                        if "WEB" == consumed_content:
-                            st.session_state.temp_web_ctx = ""
-
-                    if "chat_container" in locals() and chat_container is not None:
-                        with chat_container:
-                            with st.chat_message("model"):
-                                st.markdown(final_text)
-                    st.session_state.messages.append({"role": "model", "content": final_text})
-                    if st.session_state.get("held_chat_prompt") == prompt:
-                        st.session_state.pop("held_chat_prompt", None)
-                    st.session_state.prompt_submit_in_flight = False
-                    clear_pending_turn()
-                    print(f"DEBUG: Appending model response. Current messages length: {len(st.session_state.messages)}")
-
-                    universal_save_state_dict = {}
-                    for core_key in CORE_SCHEMA.values():
-                        universal_save_state_dict[core_key] = st.session_state.get(core_key, '')
-                    if "loaded_slots_metadata" in st.session_state:
-                        universal_save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
-                        for user_key in st.session_state.loaded_slots_metadata.keys():
-                            if user_key not in CORE_SCHEMA.values() and user_key in st.session_state:
-                                universal_save_state_dict[user_key] = st.session_state.get(user_key, '')
-                    universal_save_state_dict["messages"] = st.session_state.messages
-                    config_keys = [
-                        "chat_engine_set", "ingest_engine_set", "harvest_engine_set",
-                        "shadow_engine_set", "transcribe_engine_set",
-                        "selected_lens_name", "temp_val", "top_p_val", "memory_depth_val",
-                        "compaction_threshold", "last_harvest_message_index",
-                        "review_mode_active", "auto_shadow_active",
-                    ]
-                    for key in config_keys:
-                        universal_save_state_dict[key] = st.session_state.get(key)
-                    should_rerun = True
-                    save_project_state(universal_save_state_dict, st.session_state.active_project, silent=True)
-
-                    # Durable marker before the (possibly long) shadow call so a
-                    # dropped mobile/proxy request can catch up on the next run.
-                    st.session_state.pending_auto_shadow = True
-                    write_pending_shadow(len(st.session_state.messages))
-                    set_shadow_debug_logs([
-                        "✅ Chat reply saved.",
-                        "🕵️ Starting auto-shadow…",
-                    ])
-                    shadow_logs, any_staged_this_run, shadow_done = run_auto_shadow_turn(
-                        current_temp_val, current_top_p_val
-                    )
-                    set_shadow_debug_logs(shadow_logs)
-                    if shadow_done:
-                        mark_auto_shadow_complete()
-                    if any_staged_this_run:
-                        should_rerun = True
-
-        except Exception as e:
-            st.error(f"System Error: {e}")
-            set_shadow_debug_logs([f"System Crash: {e}"])
-
-    except Exception as e:
-        err_msg = str(e)
-        if "429" in err_msg or "ResourceExhausted" in err_msg:
-            set_shadow_debug_logs(["🚦 429 Quota Hit - Skipping Shadow."])
-            st.warning("AI rate limit reached. Please try again in a moment.")
-        else:
-            error_detail = f"Error during input processing: {err_msg}"
-            set_shadow_debug_logs([f"💀 CRASH: {err_msg}"])
-            print(f"ERROR: {error_detail}")
-            st.warning("An unexpected error occurred. Please check the sidebar for logs or try again.")
-
-# Re-snap after this run's reply is drawn into the chat pane (mobile especially).
-if prompt or st.session_state.get("shadow_logs"):
-    snap_chat_panes_to_bottom()
-
-if should_rerun:
-    st.rerun()
-
