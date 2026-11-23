@@ -6169,22 +6169,22 @@ with main_tab_chat:
                     should_rerun = True
                     save_project_state(universal_save_state_dict, st.session_state.active_project, silent=True)
 
-                            # Durable marker before the (possibly long) shadow call so a
-                            # dropped mobile/proxy request can catch up on the next run.
-                            st.session_state.pending_auto_shadow = True
-                            write_pending_shadow(len(st.session_state.messages))
-                            set_shadow_debug_logs([
-                                "✅ Chat reply saved.",
-                                "🕵️ Starting auto-shadow…",
-                            ])
-                            shadow_logs, any_staged_this_run, shadow_done = run_auto_shadow_turn(
-                                current_temp_val, current_top_p_val
-                            )
-                            set_shadow_debug_logs(shadow_logs)
-                            if shadow_done:
-                                mark_auto_shadow_complete()
-                            if any_staged_this_run:
-                                should_rerun = True
+                    # Durable marker before the (possibly long) shadow call so a
+                    # dropped mobile/proxy request can catch up on the next run.
+                    st.session_state.pending_auto_shadow = True
+                    write_pending_shadow(len(st.session_state.messages))
+                    set_shadow_debug_logs([
+                        "✅ Chat reply saved.",
+                        "🕵️ Starting auto-shadow…",
+                    ])
+                    shadow_logs, any_staged_this_run, shadow_done = run_auto_shadow_turn(
+                        current_temp_val, current_top_p_val
+                    )
+                    set_shadow_debug_logs(shadow_logs)
+                    if shadow_done:
+                        mark_auto_shadow_complete()
+                    if any_staged_this_run:
+                        should_rerun = True
 
                 except Exception as e:
                     st.error(f"System Error: {e}")
