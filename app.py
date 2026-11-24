@@ -300,51 +300,80 @@ def _write_messages_history_file(messages, project_name=None):
         return False
 
 
-def _discard_trailing_user_message():
-    """Remove a dangling last user turn from session + disk history."""
-    messages = st.session_state.get("messages")
-    if not isinstance(messages, list) or not messages:
-        return False
-    last = messages[-1]
-    if not isinstance(last, dict) or last.get("role") != "user":
-        return False
-    messages.pop()
-    st.session_state.messages = messages
-    _write_messages_history_file(messages)
-    return True
+def scrub_orphan_user_turns(messages, keep_trailing_in_flight=False):
+    """Drop every user bubble that has no following model reply.
+
+    Early history writes left permanent partial user turns in the middle of
+    chat; new prompts after that do not remove them. Returns (msgs, changed).
+    """
+    if not isinstance(messages, list):
+        return [], False
+    out = []
+    changed = False
+    i = 0
+    n = len(messages)
+    while i < n:
+        cur = messages[i]
+        if not isinstance(cur, dict):
+            i += 1
+            continue
+        role = cur.get("role")
+        if role == "user":
+            nxt = messages[i + 1] if i + 1 < n else None
+            answered = (
+                isinstance(nxt, dict)
+                and nxt.get("role") == "model"
+                and str(nxt.get("content") or "").strip()
+            )
+            if answered:
+                out.append(cur)
+                out.append(nxt)
+                i += 2
+                continue
+            # Unanswered user turn
+            is_last = i == n - 1
+            if is_last and keep_trailing_in_flight:
+                out.append(cur)
+                i += 1
+                continue
+            changed = True
+            i += 1
+            continue
+        # Keep model/other rows (orphan model is rare but harmless to keep)
+        out.append(cur)
+        i += 1
+    return out, changed
 
 
 def reconcile_stale_chat_turn():
-    """Drop leftover pending_turn / hold flags / dangling user turns.
+    """Drop leftover pending_turn / hold flags / unanswered user bubbles.
 
-    Any last-user bubble that is not from an explicit submit on THIS run is
-    treated as abandoned and removed — that banner was always stale in practice.
+    Scrubs ALL unanswered user turns from history (not only the last one), so a
+    stale partial prompt cannot linger after later successful sends.
     """
     cleaned = False
-    # Active send this run — leave the in-flight user bubble alone.
-    if st.session_state.get("_chat_submit_this_run"):
-        return False
+    in_flight = bool(st.session_state.get("_chat_submit_this_run"))
 
-    messages = st.session_state.get("messages") or []
     pending = read_pending_turn()
-    pending_prompt = str((pending or {}).get("prompt") or "").strip()
-
-    last = messages[-1] if messages and isinstance(messages[-1], dict) else None
-    last_role = (last or {}).get("role")
-    trailing = last_role == "user" and bool(str((last or {}).get("content") or "").strip())
-
-    if pending_prompt:
+    if pending and not in_flight:
         clear_pending_turn()
         cleaned = True
 
-    if st.session_state.get("held_chat_prompt") or st.session_state.get("prompt_submit_in_flight"):
-        st.session_state.pop("held_chat_prompt", None)
-        st.session_state.pop("prompt_submit_in_flight", None)
-        cleaned = True
-
-    if trailing:
-        if _discard_trailing_user_message():
+    if not in_flight:
+        if st.session_state.get("held_chat_prompt") or st.session_state.get("prompt_submit_in_flight"):
+            st.session_state.pop("held_chat_prompt", None)
+            st.session_state.pop("prompt_submit_in_flight", None)
             cleaned = True
+
+    messages = st.session_state.get("messages") or []
+    scrubbed, changed = scrub_orphan_user_turns(
+        messages,
+        keep_trailing_in_flight=in_flight,
+    )
+    if changed:
+        st.session_state.messages = scrubbed
+        _write_messages_history_file(scrubbed)
+        cleaned = True
 
     return cleaned
 
@@ -596,6 +625,13 @@ def install_mobile_resume_guard():
     const oldFab = doc.getElementById('gatewai-jump-latest-fab');
     if (oldFab) oldFab.remove();
   }} catch (e) {{}}
+  // Always prune ghost shells — even when the durable guard is already installed.
+  try {{
+    const roots = doc.querySelectorAll('[data-testid="stAppViewContainer"]');
+    for (let i = 0; i < roots.length - 1; i++) {{ try {{ roots[i].remove(); }} catch (e) {{}} }}
+    const apps = doc.querySelectorAll('[data-testid="stApp"]');
+    for (let i = 0; i < apps.length - 1; i++) {{ try {{ apps[i].remove(); }} catch (e) {{}} }}
+  }} catch (e) {{}}
   if (doc.documentElement[FLAG]) return;
   doc.documentElement[FLAG] = true;
 
@@ -665,7 +701,30 @@ def install_mobile_resume_guard():
       || doc.querySelectorAll('[data-testid="stApp"]').length > 1;
   }}
 
+  // Pale "ghost UI" is an older stApp root left under the new one — remove extras.
+  function pruneStackedAppShells() {{
+    try {{
+      const roots = doc.querySelectorAll('[data-testid="stAppViewContainer"]');
+      if (roots.length > 1) {{
+        for (let i = 0; i < roots.length - 1; i++) {{
+          try {{ roots[i].remove(); }} catch (e) {{}}
+        }}
+      }}
+      const apps = doc.querySelectorAll('[data-testid="stApp"]');
+      if (apps.length > 1) {{
+        for (let i = 0; i < apps.length - 1; i++) {{
+          try {{ apps[i].remove(); }} catch (e) {{}}
+        }}
+      }}
+      const staleBanner = doc.getElementById('gatewai-reload-banner');
+      if (staleBanner && !hasStackedAppShell()) {{
+        try {{ staleBanner.remove(); }} catch (e) {{}}
+      }}
+    }} catch (e) {{}}
+  }}
+
   function showReloadBanner() {{
+    pruneStackedAppShells();
     if (doc.getElementById('gatewai-reload-banner')) return;
     if (!hasStackedAppShell()) return;
     const bar = doc.createElement('div');
@@ -783,13 +842,16 @@ def install_mobile_resume_guard():
   // box every few seconds (that fought Submit and remount loops).
   setInterval(function () {{
     if (doc.visibilityState !== 'visible') return;
+    pruneStackedAppShells();
     showReloadBanner();
-  }}, 8000);
+  }}, 4000);
 
   setTimeout(restoreDraftToBox, 100);
   setTimeout(restoreDraftToBox, 400);
   setTimeout(restoreDraftToBox, 1000);
   setTimeout(snapChatPaneOnly, 900);
+  setTimeout(pruneStackedAppShells, 300);
+  setTimeout(pruneStackedAppShells, 1200);
 }})();
 </script>
         """,
@@ -7197,6 +7259,13 @@ if prompt:
 
                     # Always save the reply (not only when assimilation markers appear).
                     st.session_state.messages.append({"role": "model", "content": final_text})
+                    # Purge any older unanswered user bubbles left by early history saves.
+                    _scrubbed, _scrub_changed = scrub_orphan_user_turns(
+                        st.session_state.messages,
+                        keep_trailing_in_flight=False,
+                    )
+                    if _scrub_changed:
+                        st.session_state.messages = _scrubbed
                     request_chat_autoscroll()
                     if st.session_state.get("held_chat_prompt") == prompt:
                         st.session_state.pop("held_chat_prompt", None)
@@ -7254,4 +7323,5 @@ if prompt:
 
 if should_rerun:
     request_chat_autoscroll()
+    # Strategic remount after a completed turn — clears pale ghost shells on mobile.
     st.rerun()
