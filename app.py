@@ -443,7 +443,25 @@ def scrub_chat_hold():
     st.session_state.pop("held_chat_prompt", None)
     st.session_state.pop("unanswered_attempt", None)
     st.session_state.pop("prompt_submit_in_flight", None)
+    st.session_state.pop("_chat_submit_this_run", None)
     clear_pending_turn()
+
+
+def wipe_all_pending_turns():
+    """Delete every project's pending_turn.json (stale in-flight markers)."""
+    try:
+        root = BASE_PROJECT_DIR
+        if not root or not os.path.isdir(root):
+            return
+        for name in os.listdir(root):
+            path = os.path.join(root, name, "pending_turn.json")
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except Exception as e:
+                    print(f"ERROR: wipe pending_turn failed for {name}: {e}")
+    except Exception as e:
+        print(f"ERROR: wipe_all_pending_turns failed: {e}")
 
 
 if _GATEWAI_PASSWORD:
@@ -631,6 +649,23 @@ def install_mobile_resume_guard():
     for (let i = 0; i < roots.length - 1; i++) {{ try {{ roots[i].remove(); }} catch (e) {{}} }}
     const apps = doc.querySelectorAll('[data-testid="stApp"]');
     for (let i = 0; i < apps.length - 1; i++) {{ try {{ apps[i].remove(); }} catch (e) {{}} }}
+  }} catch (e) {{}}
+  // Old unanswered-banner text can only exist in a ghost shell — force one reload.
+  try {{
+    const bodyText = (doc.body && doc.body.innerText) ? doc.body.innerText : '';
+    if (
+      bodyText.indexOf('Unanswered prompt on disk') >= 0
+      || bodyText.indexOf('Resume unanswered prompt') >= 0
+    ) {{
+      const rk = 'gatewai_force_reload_stale_banner';
+      if (!w.sessionStorage.getItem(rk)) {{
+        w.sessionStorage.setItem(rk, '1');
+        w.location.reload();
+        return;
+      }}
+    }} else {{
+      try {{ w.sessionStorage.removeItem('gatewai_force_reload_stale_banner'); }} catch (e) {{}}
+    }}
   }} catch (e) {{}}
   if (doc.documentElement[FLAG]) return;
   doc.documentElement[FLAG] = true;
@@ -3833,6 +3868,15 @@ if "auto_deselect_list" not in st.session_state: st.session_state.auto_deselect_
 
 if "loaded_project" not in st.session_state: st.session_state.loaded_project = None
 
+# _chat_submit_this_run must be same-run only. Streamlit persists session_state
+# across reruns; a stuck True skipped reconcile and left "Sending…" forever.
+st.session_state.pop("_chat_submit_this_run", None)
+
+# One-time per browser session: delete all stale pending_turn.json files.
+if not st.session_state.get("_wiped_pending_turns"):
+    wipe_all_pending_turns()
+    st.session_state._wiped_pending_turns = True
+
 # Only load from disk if we switched projects or just started
 if st.session_state.loaded_project != st.session_state.active_project:
     # Drop the previous project's slots and the editor buffer before disk load.
@@ -6386,17 +6430,11 @@ with main_tab_chat:
 
         chat_container = render_project_chat(chat_pane_height(), "chat_earlier_main")
 
-        _in_flight = bool(st.session_state.get("_chat_submit_this_run")) and (
-            bool(st.session_state.get("held_chat_prompt"))
-            or bool(st.session_state.get("prompt_submit_in_flight"))
-        )
         _send_err = st.session_state.pop("chat_send_error", None)
         if _send_err:
             st.error(f"Last send failed: {_send_err}")
-        if _in_flight:
-            st.caption("⏳ Sending to the model…")
-            if not st.session_state.get("gemini_api_key") and not st.session_state.get("deepseek_api_key"):
-                st.error("No API key loaded in this session. Re-enter it in the sidebar, then send again.")
+        # No "Sending…" strip — it was getting stuck across reruns. The Thinking
+        # spinner during the API call is enough feedback.
 
         # Staging lives here (same tab as chat) — not above the tabs.
         render_staging_area()
