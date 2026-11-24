@@ -264,45 +264,105 @@ def _prompt_already_answered_in_history(prompt_text, messages):
     return False
 
 
-def reconcile_stale_chat_turn():
-    """Drop leftover pending_turn / hold flags that outlived a successful reply.
+def _pending_turn_age_seconds(pending):
+    if not isinstance(pending, dict):
+        return None
+    raw = str(pending.get("saved_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        saved = datetime.fromisoformat(raw)
+        return max(0.0, (datetime.now() - saved).total_seconds())
+    except Exception:
+        return None
 
-    Mobile restarts often keep pending_turn.json after the model answer is already
-    on disk, which resurfaces as 'Sending…' or a stale unanswered banner.
-    Returns True if durable state was cleaned (caller may st.rerun()).
+
+def _discard_trailing_user_message():
+    """Remove a dangling last user turn from session + disk history."""
+    messages = st.session_state.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return False
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "user":
+        return False
+    messages.pop()
+    st.session_state.messages = messages
+    try:
+        save = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
+        if "loaded_slots_metadata" in st.session_state:
+            save["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
+        save["messages"] = messages
+        save_project_state(save, st.session_state.active_project, silent=True)
+    except Exception as e:
+        print(f"ERROR: discard trailing user save failed: {e}")
+    return True
+
+
+def reconcile_stale_chat_turn():
+    """Drop leftover pending_turn / hold flags / dangling user turns.
+
+    Mobile restarts often keep pending_turn.json or an early-saved user bubble
+    after the user has already moved on, which resurfaces as 'Sending…' or a
+    stale unanswered banner. Returns True if state was cleaned (caller may rerun).
     """
     cleaned = False
     messages = st.session_state.get("messages") or []
     pending = read_pending_turn()
     pending_prompt = str((pending or {}).get("prompt") or "").strip()
+    pending_age = _pending_turn_age_seconds(pending)
+    # Anything older than this is treated as abandoned (user already moved on).
+    stale_after_sec = 120
+    pending_is_stale = pending_age is None or pending_age > stale_after_sec
 
-    if pending_prompt:
-        last = messages[-1] if messages and isinstance(messages[-1], dict) else None
-        last_role = (last or {}).get("role")
-        trailing = ""
-        if last_role == "user":
-            trailing = str(last.get("content") or "").strip()
+    last = messages[-1] if messages and isinstance(messages[-1], dict) else None
+    last_role = (last or {}).get("role")
+    trailing = ""
+    if last_role == "user":
+        trailing = str(last.get("content") or "").strip()
 
-        if last_role == "model" or _prompt_already_answered_in_history(pending_prompt, messages):
+    # Successful reply on disk — never keep Sending / pending around it.
+    if last_role == "model":
+        if pending_prompt:
             clear_pending_turn()
             cleaned = True
-        elif trailing and trailing != pending_prompt:
-            # History moved on; old pending is unrelated.
-            clear_pending_turn()
-            cleaned = True
-
-    if cleaned or not pending_prompt:
-        # Hold flags alone must not keep the 'Sending…' strip after a restart.
-        if st.session_state.get("prompt_submit_in_flight") and not st.session_state.get("held_chat_prompt"):
-            st.session_state.pop("prompt_submit_in_flight", None)
-            cleaned = True
-        held = str(st.session_state.get("held_chat_prompt") or "").strip()
-        if held and (
-            (messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "model")
-            or _prompt_already_answered_in_history(held, messages)
-        ):
+        if st.session_state.get("held_chat_prompt") or st.session_state.get("prompt_submit_in_flight"):
             st.session_state.pop("held_chat_prompt", None)
             st.session_state.pop("prompt_submit_in_flight", None)
+            cleaned = True
+        return cleaned
+
+    if pending_prompt and _prompt_already_answered_in_history(pending_prompt, messages):
+        clear_pending_turn()
+        pending_prompt = ""
+        cleaned = True
+
+    if pending_prompt and trailing and trailing != pending_prompt:
+        clear_pending_turn()
+        pending_prompt = ""
+        cleaned = True
+
+    # Dangling last-user bubble with no fresh pending → discard (stale partial submit).
+    if trailing and (not pending_prompt or pending_is_stale):
+        if _discard_trailing_user_message():
+            cleaned = True
+        scrub_chat_hold()
+        return cleaned
+
+    # Fresh pending + matching trailing: keep for Resume, but do NOT leave
+    # session holds stuck on 'Sending…' across reconnects.
+    if trailing and pending_prompt and not pending_is_stale:
+        if st.session_state.get("prompt_submit_in_flight") or st.session_state.get("held_chat_prompt"):
+            # Only keep holds when this same script run just set them from chat_input.
+            if not st.session_state.get("_chat_submit_this_run"):
+                st.session_state.pop("held_chat_prompt", None)
+                st.session_state.pop("prompt_submit_in_flight", None)
+                cleaned = True
+        return cleaned
+
+    # Orphan hold flags with nothing to send.
+    if st.session_state.get("held_chat_prompt") or st.session_state.get("prompt_submit_in_flight"):
+        if not st.session_state.get("_chat_submit_this_run"):
+            scrub_chat_hold()
             cleaned = True
 
     return cleaned
@@ -3941,6 +4001,7 @@ if submitted is not None:
         if already_answered:
             scrub_chat_hold()
         else:
+            st.session_state._chat_submit_this_run = True
             st.session_state.held_chat_prompt = typed
             st.session_state.prompt_submit_in_flight = True
             request_chat_autoscroll()
@@ -6307,19 +6368,11 @@ with main_tab_chat:
             _trailing = str(_chat_msgs[-1]["content"])
         _pending_turn = read_pending_turn()
         _pending_prompt = str((_pending_turn or {}).get("prompt") or "").strip()
-        # Only treat as in-flight when this run is actively sending — never from
-        # an orphan pending_turn alone (reconcile clears those; this is the backstop).
-        _in_flight = bool(st.session_state.get("held_chat_prompt")) or bool(
-            st.session_state.get("prompt_submit_in_flight")
+        # Sending strip only while this run actually submitted (chat_input / Resume).
+        _in_flight = bool(st.session_state.get("_chat_submit_this_run")) and (
+            bool(st.session_state.get("held_chat_prompt"))
+            or bool(st.session_state.get("prompt_submit_in_flight"))
         )
-        if (
-            not _in_flight
-            and _pending_prompt
-            and _trailing
-            and _pending_prompt == _trailing
-            and not _prompt_already_answered_in_history(_pending_prompt, _chat_msgs)
-        ):
-            _in_flight = True
         _send_err = st.session_state.pop("chat_send_error", None)
         if _send_err:
             st.error(f"Last send failed: {_send_err}")
@@ -6334,6 +6387,7 @@ with main_tab_chat:
             _rcol, _dcol = st.columns(2)
             with _rcol:
                 if st.button("▶️ Resume unanswered prompt", use_container_width=True, key="resume_unanswered_chat_btn"):
+                    st.session_state._chat_submit_this_run = True
                     st.session_state.held_chat_prompt = _trailing
                     st.session_state.prompt_submit_in_flight = True
                     write_pending_turn(_trailing)
@@ -6978,44 +7032,13 @@ with main_tab_editor:
 
 # --- 9. CHAT + AUTO-SHADOW (AFTER both tabs so Editor always mounts before the API call) ---
 prompt = st.session_state.get("held_chat_prompt")
-# Silent auto-resume only (Resume/Discard UI lives in the GateWai tab above).
-if not prompt:
-    pending_messages = st.session_state.get("messages") or []
-    trailing = ""
-    if (
-        pending_messages
-        and isinstance(pending_messages[-1], dict)
-        and pending_messages[-1].get("role") == "user"
-        and str(pending_messages[-1].get("content") or "").strip()
-    ):
-        trailing = str(pending_messages[-1]["content"])
-    pending_turn = read_pending_turn()
-    pending_prompt = str((pending_turn or {}).get("prompt") or "").strip()
-    # Never resurrect a pending prompt when history already ends with a model reply.
-    if pending_prompt and (
-        (pending_messages and isinstance(pending_messages[-1], dict) and pending_messages[-1].get("role") == "model")
-        or _prompt_already_answered_in_history(pending_prompt, pending_messages)
-    ):
-        clear_pending_turn()
-        pending_prompt = ""
-    in_flight = bool(st.session_state.get("prompt_submit_in_flight")) or (
-        bool(pending_prompt) and bool(trailing) and pending_prompt == trailing
-    )
-    if in_flight and trailing:
-        prompt = pending_prompt or trailing
-        st.session_state.held_chat_prompt = prompt
-        st.session_state.prompt_submit_in_flight = True
-        if not isinstance(st.session_state.get("messages"), list):
-            st.session_state.messages = list(pending_messages) if pending_messages else []
-        if (
-            st.session_state.messages
-            and isinstance(st.session_state.messages[-1], dict)
-            and st.session_state.messages[-1].get("role") == "user"
-        ):
-            st.session_state.messages[-1]["content"] = prompt
-        else:
-            st.session_state.messages.append({"role": "user", "content": prompt})
-        st.session_state.unanswered_attempt = len(st.session_state.messages)
+# Do not silently resurrect pending_turn into a send — that left mobile stuck on
+# "Sending…". Only chat_input / Resume (both set _chat_submit_this_run) may send.
+if prompt and not st.session_state.get("_chat_submit_this_run"):
+    # Hold leftover from a prior run without an explicit send this run.
+    prompt = None
+    st.session_state.pop("held_chat_prompt", None)
+    st.session_state.prompt_submit_in_flight = False
 answered_already = False
 if prompt and len(st.session_state.get("messages") or []) >= 2:
     previous = st.session_state.messages[-2]
@@ -7196,6 +7219,11 @@ if prompt:
                     print(f"ERROR: {error_detail}")
                     st.session_state["harvest_in_progress"] = False
                     st.session_state.chat_send_error = err_msg
+                    # Leave the user bubble + pending for Resume, but stop the
+                    # stuck "Sending…" strip after a failed call.
+                    st.session_state.pop("held_chat_prompt", None)
+                    st.session_state.prompt_submit_in_flight = False
+                    st.session_state.pop("_chat_submit_this_run", None)
                     response = None
 
                 if response:
