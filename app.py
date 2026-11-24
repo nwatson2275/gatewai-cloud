@@ -625,11 +625,11 @@ def read_chat_draft_cookie():
 
 
 def install_mobile_resume_guard():
-    """Mobile: persist chat draft across lock/unlock. No auto-reload loops.
+    """Mobile draft save + ghost-shell prune. Do NOT auto-restore drafts into the box.
 
-    Earlier ghost-UI detectors false-fired on Streamlit's normal duplicate tab DOM
-    and kept calling location.reload(). Draft save/restore stays; reload is manual
-    only via a small banner when a *true* stacked app root is detected.
+    Auto-restore was mobile-only pain: after Send, localStorage still held the text
+    (send-button selectors miss on iOS), then timeouts/pageshow put a 'partial
+    prompt never submitted' back into the chat box. Desktop rarely hit that path.
     """
     components.html(
         f"""
@@ -638,44 +638,85 @@ def install_mobile_resume_guard():
   const w = window.parent;
   const doc = w.document;
   const FLAG = '__gatewaiMobileResumeGuard';
-  // Remove any leftover Latest FAB from older builds (it covered the send button).
+  const LS_KEY = '{_CHAT_DRAFT_LS}';
+  const COOKIE = '{_CHAT_DRAFT_COOKIE}';
+  const SENT_KEY = 'gatewai_draft_cleared_after_send';
+
+  function clearDraft() {{
+    try {{ w.localStorage.removeItem(LS_KEY); }} catch (e) {{}}
+    try {{
+      const secure = w.location.protocol === 'https:' ? '; Secure' : '';
+      doc.cookie = COOKIE + '=; path=/; max-age=0; SameSite=Lax' + secure;
+    }} catch (e) {{}}
+  }}
+
+  function chatTextarea() {{
+    return doc.querySelector('[data-testid="stChatInput"] textarea');
+  }}
+
+  function emptyChatBoxIfDraft() {{
+    try {{
+      const ta = chatTextarea();
+      if (!ta) return;
+      const draft = (function () {{
+        try {{ return w.localStorage.getItem(LS_KEY) || ''; }} catch (e) {{ return ''; }}
+      }})();
+      // After a send we always wipe; also wipe if box still holds stale draft text.
+      if (w.sessionStorage.getItem(SENT_KEY) || draft) {{
+        clearDraft();
+        try {{
+          const proto = w.HTMLTextAreaElement && w.HTMLTextAreaElement.prototype;
+          const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+          if (desc && desc.set) desc.set.call(ta, '');
+          else ta.value = '';
+          ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        }} catch (e) {{}}
+        try {{ w.sessionStorage.removeItem(SENT_KEY); }} catch (e) {{}}
+      }}
+    }} catch (e) {{}}
+  }}
+
+  function markSentAndClear() {{
+    try {{ w.sessionStorage.setItem(SENT_KEY, '1'); }} catch (e) {{}}
+    clearDraft();
+    emptyChatBoxIfDraft();
+  }}
+
+  // Remove leftover Latest FAB / prune ghost shells on every inject.
   try {{
     const oldFab = doc.getElementById('gatewai-jump-latest-fab');
     if (oldFab) oldFab.remove();
   }} catch (e) {{}}
-  // Always prune ghost shells — even when the durable guard is already installed.
   try {{
     const roots = doc.querySelectorAll('[data-testid="stAppViewContainer"]');
     for (let i = 0; i < roots.length - 1; i++) {{ try {{ roots[i].remove(); }} catch (e) {{}} }}
     const apps = doc.querySelectorAll('[data-testid="stApp"]');
     for (let i = 0; i < apps.length - 1; i++) {{ try {{ apps[i].remove(); }} catch (e) {{}} }}
   }} catch (e) {{}}
-  // Old unanswered-banner text can only exist in a ghost shell — force one reload.
+
+  // Ghost shell still showing removed unanswered UI → one hard reload.
   try {{
     const bodyText = (doc.body && doc.body.innerText) ? doc.body.innerText : '';
     if (
       bodyText.indexOf('Unanswered prompt on disk') >= 0
       || bodyText.indexOf('Resume unanswered prompt') >= 0
+      || bodyText.indexOf('Sending to the model') >= 0
     ) {{
-      const rk = 'gatewai_force_reload_stale_banner';
+      const rk = 'gatewai_force_reload_stale_banner_v2';
       if (!w.sessionStorage.getItem(rk)) {{
         w.sessionStorage.setItem(rk, '1');
+        clearDraft();
         w.location.reload();
         return;
       }}
-    }} else {{
-      try {{ w.sessionStorage.removeItem('gatewai_force_reload_stale_banner'); }} catch (e) {{}}
     }}
   }} catch (e) {{}}
+
+  // Always clear stale draft after sends / on each Streamlit remount inject.
+  emptyChatBoxIfDraft();
+
   if (doc.documentElement[FLAG]) return;
   doc.documentElement[FLAG] = true;
-
-  const LS_KEY = '{_CHAT_DRAFT_LS}';
-  const COOKIE = '{_CHAT_DRAFT_COOKIE}';
-
-  function chatTextarea() {{
-    return doc.querySelector('[data-testid="stChatInput"] textarea');
-  }}
 
   function saveDraft(text) {{
     try {{
@@ -707,36 +748,11 @@ def install_mobile_resume_guard():
     }} catch (e) {{}}
   }}
 
-  function setNativeTextareaValue(ta, value) {{
-    try {{
-      const proto = w.HTMLTextAreaElement && w.HTMLTextAreaElement.prototype;
-      const desc = proto && Object.getOwnPropertyDescriptor(proto, 'value');
-      if (desc && desc.set) desc.set.call(ta, value);
-      else ta.value = value;
-      ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
-      ta.dispatchEvent(new Event('change', {{ bubbles: true }}));
-    }} catch (e) {{
-      try {{ ta.value = value; }} catch (e2) {{}}
-    }}
-  }}
-
-  function restoreDraftToBox() {{
-    const draft = readDraft();
-    if (!draft || !String(draft).trim()) return false;
-    const ta = chatTextarea();
-    if (!ta) return false;
-    if ((ta.value || '').trim()) return false;
-    setNativeTextareaValue(ta, draft);
-    return true;
-  }}
-
-  // Only a real stacked Streamlit shell — NOT duplicate tab nodes (normal in Streamlit).
   function hasStackedAppShell() {{
     return doc.querySelectorAll('[data-testid="stAppViewContainer"]').length > 1
       || doc.querySelectorAll('[data-testid="stApp"]').length > 1;
   }}
 
-  // Pale "ghost UI" is an older stApp root left under the new one — remove extras.
   function pruneStackedAppShells() {{
     try {{
       const roots = doc.querySelectorAll('[data-testid="stAppViewContainer"]');
@@ -751,37 +767,17 @@ def install_mobile_resume_guard():
           try {{ apps[i].remove(); }} catch (e) {{}}
         }}
       }}
-      const staleBanner = doc.getElementById('gatewai-reload-banner');
-      if (staleBanner && !hasStackedAppShell()) {{
-        try {{ staleBanner.remove(); }} catch (e) {{}}
-      }}
     }} catch (e) {{}}
   }}
 
-  function showReloadBanner() {{
+  function maybeAutoReloadGhost() {{
     pruneStackedAppShells();
-    if (doc.getElementById('gatewai-reload-banner')) return;
     if (!hasStackedAppShell()) return;
-    const bar = doc.createElement('div');
-    bar.id = 'gatewai-reload-banner';
-    bar.setAttribute('style',
-      'position:fixed;left:0;right:0;top:0;z-index:999999;padding:10px 12px;' +
-      'background:#b71c1c;color:#fff;font:600 14px/1.3 system-ui,sans-serif;' +
-      'display:flex;gap:10px;align-items:center;justify-content:space-between;'
-    );
-    bar.innerHTML = '<span>Display glitch detected. Tap to refresh (your draft is saved).</span>';
-    const btn = doc.createElement('button');
-    btn.textContent = 'Refresh';
-    btn.setAttribute('style',
-      'border:0;border-radius:6px;padding:8px 12px;font-weight:700;cursor:pointer;'
-    );
-    btn.onclick = function () {{
-      saveDraftFromDom();
-      writeDraftCookie(readDraft());
-      w.location.reload();
-    }};
-    bar.appendChild(btn);
-    doc.body.appendChild(bar);
+    const rk = 'gatewai_force_reload_ghost_shell_v1';
+    if (w.sessionStorage.getItem(rk)) return;
+    w.sessionStorage.setItem(rk, '1');
+    clearDraft();
+    w.location.reload();
   }}
 
   function snapChatPaneOnly() {{
@@ -814,17 +810,10 @@ def install_mobile_resume_guard():
     }} catch (e) {{}}
   }}
 
-  function clearDraft() {{
-    try {{ w.localStorage.removeItem(LS_KEY); }} catch (e) {{}}
-    try {{
-      const secure = w.location.protocol === 'https:' ? '; Secure' : '';
-      doc.cookie = COOKIE + '=; path=/; max-age=0; SameSite=Lax' + secure;
-    }} catch (e) {{}}
-  }}
-
   function isChatSendControl(el) {{
     if (!el || !el.closest) return false;
     if (el.closest('[data-testid="stChatInputSubmitButton"]')) return true;
+    if (el.closest('[data-testid="stChatInput"] button')) return true;
     const wrap = el.closest('[data-testid="stChatInput"]');
     if (!wrap) return false;
     const btn = el.closest('button');
@@ -834,59 +823,57 @@ def install_mobile_resume_guard():
   doc.addEventListener('input', function (e) {{
     const t = e.target;
     if (!t || !t.closest || !t.closest('[data-testid="stChatInput"]')) return;
+    // Do not keep saving after we've marked a send.
+    if (w.sessionStorage.getItem(SENT_KEY)) return;
     saveDraft(t.value || '');
   }}, true);
 
-  // Clear draft as soon as the user sends — do not wait for a Streamlit iframe.
   doc.addEventListener('keydown', function (e) {{
     const t = e.target;
     if (!t || !t.closest || !t.closest('[data-testid="stChatInput"] textarea')) return;
     if (e.key !== 'Enter' || e.shiftKey) return;
-    clearDraft();
+    markSentAndClear();
   }}, true);
   doc.addEventListener('click', function (e) {{
     if (!isChatSendControl(e.target)) return;
-    clearDraft();
+    markSentAndClear();
+  }}, true);
+  doc.addEventListener('touchend', function (e) {{
+    if (!isChatSendControl(e.target)) return;
+    markSentAndClear();
   }}, true);
 
+  // Save on lock only — do NOT restore into the box (that caused the mobile ghost prompt).
   doc.addEventListener('visibilitychange', function () {{
     if (doc.visibilityState === 'hidden') {{
-      saveDraftFromDom();
-      writeDraftCookie(readDraft());
+      if (!w.sessionStorage.getItem(SENT_KEY)) {{
+        saveDraftFromDom();
+        writeDraftCookie(readDraft());
+      }}
       return;
     }}
-    if (doc.visibilityState !== 'visible') return;
-    setTimeout(restoreDraftToBox, 200);
-    setTimeout(restoreDraftToBox, 600);
-    setTimeout(showReloadBanner, 800);
+    setTimeout(emptyChatBoxIfDraft, 100);
+    setTimeout(maybeAutoReloadGhost, 400);
     setTimeout(snapChatPaneOnly, 500);
   }});
 
-  w.addEventListener('pageshow', function (ev) {{
-    if (ev && ev.persisted) {{
-      saveDraftFromDom();
-      writeDraftCookie(readDraft());
-    }}
-    setTimeout(restoreDraftToBox, 250);
-    setTimeout(restoreDraftToBox, 800);
-    setTimeout(showReloadBanner, 900);
+  w.addEventListener('pageshow', function () {{
+    setTimeout(emptyChatBoxIfDraft, 50);
+    setTimeout(maybeAutoReloadGhost, 400);
     setTimeout(snapChatPaneOnly, 600);
   }});
 
-  // Banner check only — never auto location.reload(). Avoid re-filling the
-  // box every few seconds (that fought Submit and remount loops).
   setInterval(function () {{
     if (doc.visibilityState !== 'visible') return;
     pruneStackedAppShells();
-    showReloadBanner();
-  }}, 4000);
+    maybeAutoReloadGhost();
+  }}, 5000);
 
-  setTimeout(restoreDraftToBox, 100);
-  setTimeout(restoreDraftToBox, 400);
-  setTimeout(restoreDraftToBox, 1000);
+  setTimeout(emptyChatBoxIfDraft, 50);
+  setTimeout(emptyChatBoxIfDraft, 400);
   setTimeout(snapChatPaneOnly, 900);
   setTimeout(pruneStackedAppShells, 300);
-  setTimeout(pruneStackedAppShells, 1200);
+  setTimeout(maybeAutoReloadGhost, 800);
 }})();
 </script>
         """,
@@ -4006,20 +3993,12 @@ if dictation_notice:
 
 if "main_chat_input_nonce" not in st.session_state:
     st.session_state.main_chat_input_nonce = 0
-# Restore draft from cookie ONCE per browser session. Re-applying every run
-# remounts st.chat_input (new key) and drops the user's Send — prompt never
-# reaches the API and mobile ghost UI follows the remount churn.
-if not st.session_state.get("_chat_draft_cookie_applied"):
-    st.session_state._chat_draft_cookie_applied = True
-    if (
-        "pending_chat_dictation" not in st.session_state
-        and "pending_chat_draft" not in st.session_state
-        and not st.session_state.get("held_chat_prompt")
-        and not st.session_state.get("prompt_submit_in_flight")
-    ):
-        _cookie_draft = read_chat_draft_cookie()
-        if _cookie_draft:
-            st.session_state.pending_chat_draft = _cookie_draft
+# Cookie draft restore disabled: on mobile it re-filled the chat box with a
+# stale "partial prompt" after successful sends (desktop rarely hit this).
+# Draft is still saved to localStorage on phone-lock for crash recovery, but
+# we no longer push it back into st.chat_input automatically.
+st.session_state._chat_draft_cookie_applied = True
+st.session_state.pop("pending_chat_draft", None)
 # The key stays put on a normal send. Changing it at the start of a run
 # drops the submission the user just made, and the box comes back empty.
 if "pending_chat_dictation" in st.session_state:
