@@ -610,10 +610,39 @@ def install_mobile_resume_guard():
     }} catch (e) {{}}
   }}
 
+  function clearDraft() {{
+    try {{ w.localStorage.removeItem(LS_KEY); }} catch (e) {{}}
+    try {{
+      const secure = w.location.protocol === 'https:' ? '; Secure' : '';
+      doc.cookie = COOKIE + '=; path=/; max-age=0; SameSite=Lax' + secure;
+    }} catch (e) {{}}
+  }}
+
+  function isChatSendControl(el) {{
+    if (!el || !el.closest) return false;
+    if (el.closest('[data-testid="stChatInputSubmitButton"]')) return true;
+    const wrap = el.closest('[data-testid="stChatInput"]');
+    if (!wrap) return false;
+    const btn = el.closest('button');
+    return !!(btn && wrap.contains(btn));
+  }}
+
   doc.addEventListener('input', function (e) {{
     const t = e.target;
     if (!t || !t.closest || !t.closest('[data-testid="stChatInput"]')) return;
     saveDraft(t.value || '');
+  }}, true);
+
+  // Clear draft as soon as the user sends — do not wait for a Streamlit iframe.
+  doc.addEventListener('keydown', function (e) {{
+    const t = e.target;
+    if (!t || !t.closest || !t.closest('[data-testid="stChatInput"] textarea')) return;
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    clearDraft();
+  }}, true);
+  doc.addEventListener('click', function (e) {{
+    if (!isChatSendControl(e.target)) return;
+    clearDraft();
   }}, true);
 
   doc.addEventListener('visibilitychange', function () {{
@@ -640,17 +669,38 @@ def install_mobile_resume_guard():
     setTimeout(snapChatPaneOnly, 600);
   }});
 
-  // Occasional banner check only — never auto location.reload().
+  // Banner check only — never auto location.reload(). Avoid re-filling the
+  // box every few seconds (that fought Submit and remount loops).
   setInterval(function () {{
     if (doc.visibilityState !== 'visible') return;
-    restoreDraftToBox();
     showReloadBanner();
-  }}, 4000);
+  }}, 8000);
+
+  // Durable Jump control (no Streamlit iframe remount / no rerun).
+  function ensureJumpButton() {{
+    if (doc.getElementById('gatewai-jump-latest-fab')) return;
+    const btn = doc.createElement('button');
+    btn.id = 'gatewai-jump-latest-fab';
+    btn.type = 'button';
+    btn.textContent = '⬇️ Latest';
+    btn.setAttribute('style',
+      'position:fixed;right:12px;bottom:72px;z-index:999998;padding:8px 12px;' +
+      'border:1px solid #b71c1c;border-radius:999px;background:#fff;color:#b71c1c;' +
+      'font:600 13px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12);'
+    );
+    btn.onclick = function () {{
+      snapChatPaneOnly();
+      setTimeout(snapChatPaneOnly, 80);
+      setTimeout(snapChatPaneOnly, 250);
+    }};
+    doc.body.appendChild(btn);
+  }}
 
   setTimeout(restoreDraftToBox, 100);
   setTimeout(restoreDraftToBox, 400);
   setTimeout(restoreDraftToBox, 1000);
   setTimeout(snapChatPaneOnly, 900);
+  setTimeout(ensureJumpButton, 500);
 }})();
 </script>
         """,
@@ -3755,16 +3805,20 @@ if dictation_notice:
 
 if "main_chat_input_nonce" not in st.session_state:
     st.session_state.main_chat_input_nonce = 0
-# Restore unsaved prompt text after mobile lock/reload (cookie written on hide/reload).
-if (
-    "pending_chat_dictation" not in st.session_state
-    and "pending_chat_draft" not in st.session_state
-    and not st.session_state.get("held_chat_prompt")
-    and not st.session_state.get("prompt_submit_in_flight")
-):
-    _cookie_draft = read_chat_draft_cookie()
-    if _cookie_draft:
-        st.session_state.pending_chat_draft = _cookie_draft
+# Restore draft from cookie ONCE per browser session. Re-applying every run
+# remounts st.chat_input (new key) and drops the user's Send — prompt never
+# reaches the API and mobile ghost UI follows the remount churn.
+if not st.session_state.get("_chat_draft_cookie_applied"):
+    st.session_state._chat_draft_cookie_applied = True
+    if (
+        "pending_chat_dictation" not in st.session_state
+        and "pending_chat_draft" not in st.session_state
+        and not st.session_state.get("held_chat_prompt")
+        and not st.session_state.get("prompt_submit_in_flight")
+    ):
+        _cookie_draft = read_chat_draft_cookie()
+        if _cookie_draft:
+            st.session_state.pending_chat_draft = _cookie_draft
 # The key stays put on a normal send. Changing it at the start of a run
 # drops the submission the user just made, and the box comes back empty.
 if "pending_chat_dictation" in st.session_state:
@@ -3836,17 +3890,7 @@ if submitted is not None:
             st.session_state.prompt_submit_in_flight = True
             request_chat_autoscroll()
             write_pending_turn(typed)
-            # Clear mobile draft so unlock does not resurrect a sent prompt.
-            components.html(
-                f"""<script>
-try {{
-  window.parent.localStorage.removeItem('{_CHAT_DRAFT_LS}');
-  document.cookie = '{_CHAT_DRAFT_COOKIE}=; path=/; max-age=0; SameSite=Lax';
-}} catch (e) {{}}
-</script>""",
-                height=0,
-                width=0,
-            )
+            # Draft clear is client-side on Send (resume guard) — no iframe here.
             if not isinstance(st.session_state.get("messages"), list):
                 st.session_state.messages = list(messages) if isinstance(messages, list) else []
             if not (
@@ -6204,63 +6248,6 @@ with main_tab_chat:
             and str(_chat_msgs[-1].get("content") or "").strip()
         ):
             _trailing = str(_chat_msgs[-1]["content"])
-        if (
-            _chat_msgs
-            and isinstance(_chat_msgs[-1], dict)
-            and _chat_msgs[-1].get("role") == "model"
-            and str(_chat_msgs[-1].get("content") or "").strip()
-        ):
-            # Client-only jump — a Streamlit button+rerun was creating ghost UI on mobile.
-            components.html(
-                """
-<div style="margin:0 0 8px 0;">
-  <button id="gatewai-jump-latest"
-    style="width:100%;padding:10px 12px;border:1px solid #b71c1c;border-radius:6px;
-           background:#fff;color:#b71c1c;font:600 14px/1.2 system-ui,sans-serif;cursor:pointer;">
-    ⬇️ Jump to latest reply
-  </button>
-</div>
-<script>
-(function () {
-  const doc = window.parent.document;
-  const win = window.parent;
-  function snap() {
-    const root = doc.querySelector('section.main') || doc;
-    const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
-    if (!msgs.length) return;
-    const last = msgs[msgs.length - 1];
-    let el = last.parentElement;
-    while (el && el !== doc.body) {
-      if (el === doc.documentElement || el === doc.body) break;
-      if (el.matches && (
-        el.matches('section.main') ||
-        el.matches('[data-testid="stAppViewContainer"]') ||
-        el.matches('[data-testid="stAppScrollToBottomContainer"]') ||
-        el.matches('[data-testid="stMain"]')
-      )) { el = el.parentElement; continue; }
-      if (el.clientHeight > win.innerHeight * 0.85) { el = el.parentElement; continue; }
-      if (el.scrollHeight > el.clientHeight + 8 && el.clientHeight > 40) {
-        try { el.style.scrollBehavior = 'auto'; } catch (e) {}
-        el.scrollTop = el.scrollHeight;
-        return;
-      }
-      el = el.parentElement;
-    }
-  }
-  const btn = document.getElementById('gatewai-jump-latest');
-  if (btn) {
-    btn.onclick = function () {
-      snap();
-      setTimeout(snap, 50);
-      setTimeout(snap, 200);
-      setTimeout(snap, 500);
-    };
-  }
-})();
-</script>
-                """,
-                height=52,
-            )
         _pending_turn = read_pending_turn()
         _pending_prompt = str((_pending_turn or {}).get("prompt") or "").strip()
         _in_flight = bool(st.session_state.get("held_chat_prompt")) or bool(
