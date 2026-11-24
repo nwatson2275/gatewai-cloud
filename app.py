@@ -486,6 +486,17 @@ def install_mobile_resume_guard():
   const w = window.parent;
   const doc = w.document;
   const FLAG = '__gatewaiMobileResumeGuard';
+  // Always keep Latest clear of the chat send button (even if guard already installed).
+  (function repositionJumpFab() {{
+    const btn = doc.getElementById('gatewai-jump-latest-fab');
+    if (!btn) return;
+    btn.setAttribute('style',
+      'position:fixed;left:12px;top:56px;right:auto;bottom:auto;z-index:999998;' +
+      'padding:8px 12px;border:1px solid #b71c1c;border-radius:999px;background:#fff;' +
+      'color:#b71c1c;font:600 13px/1 system-ui,sans-serif;cursor:pointer;' +
+      'box-shadow:0 2px 8px rgba(0,0,0,.12);'
+    );
+  }})();
   if (doc.documentElement[FLAG]) return;
   doc.documentElement[FLAG] = true;
 
@@ -676,24 +687,27 @@ def install_mobile_resume_guard():
     showReloadBanner();
   }}, 8000);
 
-  // Durable Jump control (no Streamlit iframe remount / no rerun).
+  // Keep Latest away from the bottom chat send control (right/bottom overlaps it).
   function ensureJumpButton() {{
-    if (doc.getElementById('gatewai-jump-latest-fab')) return;
-    const btn = doc.createElement('button');
-    btn.id = 'gatewai-jump-latest-fab';
-    btn.type = 'button';
-    btn.textContent = '⬇️ Latest';
+    let btn = doc.getElementById('gatewai-jump-latest-fab');
+    if (!btn) {{
+      btn = doc.createElement('button');
+      btn.id = 'gatewai-jump-latest-fab';
+      btn.type = 'button';
+      btn.textContent = '⬇️ Latest';
+      btn.onclick = function () {{
+        snapChatPaneOnly();
+        setTimeout(snapChatPaneOnly, 80);
+        setTimeout(snapChatPaneOnly, 250);
+      }};
+      doc.body.appendChild(btn);
+    }}
     btn.setAttribute('style',
-      'position:fixed;right:12px;bottom:72px;z-index:999998;padding:8px 12px;' +
-      'border:1px solid #b71c1c;border-radius:999px;background:#fff;color:#b71c1c;' +
-      'font:600 13px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12);'
+      'position:fixed;left:12px;top:56px;right:auto;bottom:auto;z-index:999998;' +
+      'padding:8px 12px;border:1px solid #b71c1c;border-radius:999px;background:#fff;' +
+      'color:#b71c1c;font:600 13px/1 system-ui,sans-serif;cursor:pointer;' +
+      'box-shadow:0 2px 8px rgba(0,0,0,.12);'
     );
-    btn.onclick = function () {{
-      snapChatPaneOnly();
-      setTimeout(snapChatPaneOnly, 80);
-      setTimeout(snapChatPaneOnly, 250);
-    }};
-    doc.body.appendChild(btn);
   }}
 
   setTimeout(restoreDraftToBox, 100);
@@ -701,6 +715,8 @@ def install_mobile_resume_guard():
   setTimeout(restoreDraftToBox, 1000);
   setTimeout(snapChatPaneOnly, 900);
   setTimeout(ensureJumpButton, 500);
+  // Reposition even if an older FAB was left over from a prior inject.
+  setTimeout(ensureJumpButton, 2000);
 }})();
 </script>
         """,
