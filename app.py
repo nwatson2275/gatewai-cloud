@@ -698,24 +698,6 @@ def install_mobile_resume_guard():
     for (let i = 0; i < apps.length - 1; i++) {{ try {{ apps[i].remove(); }} catch (e) {{}} }}
   }} catch (e) {{}}
 
-  // Ghost shell still showing removed unanswered UI → one hard reload.
-  try {{
-    const bodyText = (doc.body && doc.body.innerText) ? doc.body.innerText : '';
-    if (
-      bodyText.indexOf('Unanswered prompt on disk') >= 0
-      || bodyText.indexOf('Resume unanswered prompt') >= 0
-      || bodyText.indexOf('Sending to the model') >= 0
-    ) {{
-      const rk = 'gatewai_force_reload_stale_banner_v2';
-      if (!w.sessionStorage.getItem(rk)) {{
-        w.sessionStorage.setItem(rk, '1');
-        clearDraft();
-        w.location.reload();
-        return;
-      }}
-    }}
-  }} catch (e) {{}}
-
   // Always clear stale draft after sends / on each Streamlit remount inject.
   emptyChatBoxIfDraft();
 
@@ -774,14 +756,10 @@ def install_mobile_resume_guard():
     }} catch (e) {{}}
   }}
 
+  // Prune only — never location.reload() here. Auto-reload during Submit /
+  // Scrub / Thinking was stacking the pale double shell on mobile.
   function maybeAutoReloadGhost() {{
     pruneStackedAppShells();
-    if (!hasStackedAppShell()) return;
-    const rk = 'gatewai_force_reload_ghost_shell_v1';
-    if (w.sessionStorage.getItem(rk)) return;
-    w.sessionStorage.setItem(rk, '1');
-    clearDraft();
-    w.location.reload();
   }}
 
   function snapChatPaneOnly() {{
@@ -4089,6 +4067,8 @@ if submitted is not None:
             # Remount once before the long model call — calling the API in the
             # same paint as Submit stacked a pale double shell on mobile.
             st.session_state._run_model_after_remount = True
+            # Land on GateWai so Thinking + reply are visible (keyed main view).
+            st.session_state.main_view_selector = "💬 GateWai"
             st.rerun()
 
 
@@ -5501,7 +5481,8 @@ with st.sidebar:
                 save_state_dict["messages"] = st.session_state.messages
                 save_project_state(save_state_dict, st.session_state.active_project)
                 st.toast("Rewound history by 1 turn.")
-                st.rerun()
+                # No st.rerun() — the button click already remounts; a second
+                # rerun was stacking pale double UI on mobile.
             elif (
                 len(msgs) == 1
                 and isinstance(msgs[-1], dict)
@@ -5514,7 +5495,6 @@ with st.sidebar:
                 save_state_dict["messages"] = st.session_state.messages
                 save_project_state(save_state_dict, st.session_state.active_project)
                 st.toast("Discarded unanswered prompt.")
-                st.rerun()
             else:
                 st.warning("History is empty.")
 
@@ -6388,13 +6368,24 @@ if st.session_state.get("harvest_result") or st.session_state.get("harvest_error
 
 # Staging Area renders inside GateWai via render_staging_area().
 
-# THE SPLIT-BRAIN INTERFACE
-main_tab_chat, main_tab_editor = st.tabs(["💬 GateWai", "📝 Editor"])
+# Keyed radio (not st.tabs): Streamlit always resets st.tabs to the first tab
+# after any widget remount, so Show File List kicked users back to GateWai.
+_MAIN_GATEWAI = "💬 GateWai"
+_MAIN_EDITOR = "📝 Editor"
+if "main_view_selector" not in st.session_state:
+    st.session_state.main_view_selector = _MAIN_GATEWAI
+main_view = st.radio(
+    "Main view",
+    [_MAIN_GATEWAI, _MAIN_EDITOR],
+    horizontal=True,
+    key="main_view_selector",
+    label_visibility="collapsed",
+)
 
 # =========================================================
-# TAB 1: GateWai (Chat & Artifacts)
+# VIEW 1: GateWai (Chat & Artifacts)
 # =========================================================
-with main_tab_chat:
+if main_view == _MAIN_GATEWAI:
     # Split preview crushes the chat pane on phones after submit; keep one column
     # while a turn is in flight (restart "fixes" UI mainly by clearing this state).
     _pending_now = read_pending_turn()
@@ -6530,11 +6521,11 @@ with main_tab_chat:
                                 st.rerun()
 
 # =========================================================
-# TAB 2: EDITOR (The Integrated IDE)
+# VIEW 2: EDITOR (The Integrated IDE)
 # =========================================================
-with main_tab_editor:
+else:
     pin_editor_tab_to_top()
-    # Keyed checkbox only — an extra st.rerun() here reset main tabs back to GateWai.
+    # Keyed checkbox — selection is kept via main_view_selector radio above.
     if "show_file_list" not in st.session_state:
         st.session_state.show_file_list = False
     show_file_list = st.checkbox(
