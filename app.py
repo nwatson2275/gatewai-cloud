@@ -244,6 +244,70 @@ def clear_pending_turn(project_name=None):
             print(f"ERROR: clear_pending_turn failed: {e}")
 
 
+def _prompt_already_answered_in_history(prompt_text, messages):
+    """True if this user prompt already has a non-empty model reply after it."""
+    prompt_text = str(prompt_text or "").strip()
+    if not prompt_text or not isinstance(messages, list):
+        return False
+    for i in range(len(messages) - 1):
+        cur = messages[i]
+        nxt = messages[i + 1]
+        if not isinstance(cur, dict) or not isinstance(nxt, dict):
+            continue
+        if (
+            cur.get("role") == "user"
+            and str(cur.get("content") or "").strip() == prompt_text
+            and nxt.get("role") == "model"
+            and str(nxt.get("content") or "").strip()
+        ):
+            return True
+    return False
+
+
+def reconcile_stale_chat_turn():
+    """Drop leftover pending_turn / hold flags that outlived a successful reply.
+
+    Mobile restarts often keep pending_turn.json after the model answer is already
+    on disk, which resurfaces as 'Sending…' or a stale unanswered banner.
+    Returns True if durable state was cleaned (caller may st.rerun()).
+    """
+    cleaned = False
+    messages = st.session_state.get("messages") or []
+    pending = read_pending_turn()
+    pending_prompt = str((pending or {}).get("prompt") or "").strip()
+
+    if pending_prompt:
+        last = messages[-1] if messages and isinstance(messages[-1], dict) else None
+        last_role = (last or {}).get("role")
+        trailing = ""
+        if last_role == "user":
+            trailing = str(last.get("content") or "").strip()
+
+        if last_role == "model" or _prompt_already_answered_in_history(pending_prompt, messages):
+            clear_pending_turn()
+            cleaned = True
+        elif trailing and trailing != pending_prompt:
+            # History moved on; old pending is unrelated.
+            clear_pending_turn()
+            cleaned = True
+
+    if cleaned or not pending_prompt:
+        # Hold flags alone must not keep the 'Sending…' strip after a restart.
+        if st.session_state.get("prompt_submit_in_flight") and not st.session_state.get("held_chat_prompt"):
+            st.session_state.pop("prompt_submit_in_flight", None)
+            cleaned = True
+        held = str(st.session_state.get("held_chat_prompt") or "").strip()
+        if held and (
+            (messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "model")
+            or _prompt_already_answered_in_history(held, messages)
+        ):
+            st.session_state.pop("held_chat_prompt", None)
+            st.session_state.pop("prompt_submit_in_flight", None)
+            cleaned = True
+
+    return cleaned
+
+
 def pending_shadow_path(project_name=None):
     project_name = project_name or st.session_state.get("active_project") or ""
     if not project_name:
@@ -486,17 +550,11 @@ def install_mobile_resume_guard():
   const w = window.parent;
   const doc = w.document;
   const FLAG = '__gatewaiMobileResumeGuard';
-  // Always keep Latest clear of the chat send button (even if guard already installed).
-  (function repositionJumpFab() {{
-    const btn = doc.getElementById('gatewai-jump-latest-fab');
-    if (!btn) return;
-    btn.setAttribute('style',
-      'position:fixed;left:12px;top:56px;right:auto;bottom:auto;z-index:999998;' +
-      'padding:8px 12px;border:1px solid #b71c1c;border-radius:999px;background:#fff;' +
-      'color:#b71c1c;font:600 13px/1 system-ui,sans-serif;cursor:pointer;' +
-      'box-shadow:0 2px 8px rgba(0,0,0,.12);'
-    );
-  }})();
+  // Remove any leftover Latest FAB from older builds (it covered the send button).
+  try {{
+    const oldFab = doc.getElementById('gatewai-jump-latest-fab');
+    if (oldFab) oldFab.remove();
+  }} catch (e) {{}}
   if (doc.documentElement[FLAG]) return;
   doc.documentElement[FLAG] = true;
 
@@ -687,36 +745,10 @@ def install_mobile_resume_guard():
     showReloadBanner();
   }}, 8000);
 
-  // Keep Latest away from the bottom chat send control (right/bottom overlaps it).
-  function ensureJumpButton() {{
-    let btn = doc.getElementById('gatewai-jump-latest-fab');
-    if (!btn) {{
-      btn = doc.createElement('button');
-      btn.id = 'gatewai-jump-latest-fab';
-      btn.type = 'button';
-      btn.textContent = '⬇️ Latest';
-      btn.onclick = function () {{
-        snapChatPaneOnly();
-        setTimeout(snapChatPaneOnly, 80);
-        setTimeout(snapChatPaneOnly, 250);
-      }};
-      doc.body.appendChild(btn);
-    }}
-    btn.setAttribute('style',
-      'position:fixed;left:12px;top:56px;right:auto;bottom:auto;z-index:999998;' +
-      'padding:8px 12px;border:1px solid #b71c1c;border-radius:999px;background:#fff;' +
-      'color:#b71c1c;font:600 13px/1 system-ui,sans-serif;cursor:pointer;' +
-      'box-shadow:0 2px 8px rgba(0,0,0,.12);'
-    );
-  }}
-
   setTimeout(restoreDraftToBox, 100);
   setTimeout(restoreDraftToBox, 400);
   setTimeout(restoreDraftToBox, 1000);
   setTimeout(snapChatPaneOnly, 900);
-  setTimeout(ensureJumpButton, 500);
-  // Reposition even if an older FAB was left over from a prior inject.
-  setTimeout(ensureJumpButton, 2000);
 }})();
 </script>
         """,
@@ -3790,7 +3822,9 @@ if st.session_state.loaded_project != st.session_state.active_project:
     if st.session_state.get("selected_file") not in loaded_names:
         st.session_state.selected_file = CORE_SCHEMA.get("summary.txt", "MI_Master_Record")
         st.session_state.last_selected_file_for_editor = st.session_state.selected_file
-#    st.rerun()
+    # Drop stale pending_turn left after successful replies (common on mobile restart).
+    if reconcile_stale_chat_turn():
+        st.rerun()
 
 # Staged proposals survive a browser restart. Harvest stores them in the
 # session and reruns; the next run copies that session onto disk.
@@ -3807,6 +3841,11 @@ if st.session_state.loaded_project == st.session_state.active_project:
         st.session_state._pending_updates_snapshot = pending_snapshot
 
 adopt_saved_engine_room_if_needed(st.session_state.active_project)
+
+# Every run: scrub orphan pending_turn so a restart never shows a stale
+# "unanswered / Sending…" strip after the model already replied.
+if reconcile_stale_chat_turn() and not st.session_state.get("held_chat_prompt"):
+    st.rerun()
 
 # Read the chat box before the sidebar. A sidebar rerun used to clear the
 # box before this widget ran, so the message never reached the API.
@@ -6235,9 +6274,11 @@ main_tab_chat, main_tab_editor = st.tabs(["💬 GateWai", "📝 Editor"])
 with main_tab_chat:
     # Split preview crushes the chat pane on phones after submit; keep one column
     # while a turn is in flight (restart "fixes" UI mainly by clearing this state).
+    _pending_now = read_pending_turn()
+    _pending_now_prompt = str((_pending_now or {}).get("prompt") or "").strip()
     _turn_busy = bool(st.session_state.get("held_chat_prompt")) or bool(
         st.session_state.get("prompt_submit_in_flight")
-    ) or bool(read_pending_turn()) or bool(st.session_state.get("pending_updates"))
+    ) or bool(_pending_now_prompt) or bool(st.session_state.get("pending_updates"))
     # Never split chat/preview on phones — two columns + staging unglues the page.
     _use_preview_split = (
         bool(st.session_state.show_preview)
@@ -6266,11 +6307,19 @@ with main_tab_chat:
             _trailing = str(_chat_msgs[-1]["content"])
         _pending_turn = read_pending_turn()
         _pending_prompt = str((_pending_turn or {}).get("prompt") or "").strip()
+        # Only treat as in-flight when this run is actively sending — never from
+        # an orphan pending_turn alone (reconcile clears those; this is the backstop).
         _in_flight = bool(st.session_state.get("held_chat_prompt")) or bool(
             st.session_state.get("prompt_submit_in_flight")
-        ) or (
-            bool(_pending_prompt) and (not _trailing or _pending_prompt == _trailing)
         )
+        if (
+            not _in_flight
+            and _pending_prompt
+            and _trailing
+            and _pending_prompt == _trailing
+            and not _prompt_already_answered_in_history(_pending_prompt, _chat_msgs)
+        ):
+            _in_flight = True
         _send_err = st.session_state.pop("chat_send_error", None)
         if _send_err:
             st.error(f"Last send failed: {_send_err}")
@@ -6278,7 +6327,7 @@ with main_tab_chat:
             st.caption("⏳ Sending to the model…")
             if not st.session_state.get("gemini_api_key") and not st.session_state.get("deepseek_api_key"):
                 st.error("No API key loaded in this session. Re-enter it in the sidebar, then tap Resume.")
-        elif _trailing:
+        elif _trailing and not _prompt_already_answered_in_history(_trailing, _chat_msgs):
             _preview = _trailing if len(_trailing) <= 180 else _trailing[:180] + "…"
             st.warning("Unanswered prompt on disk (reconnect often leaves this behind).")
             st.caption(_preview)
@@ -6942,10 +6991,17 @@ if not prompt:
         trailing = str(pending_messages[-1]["content"])
     pending_turn = read_pending_turn()
     pending_prompt = str((pending_turn or {}).get("prompt") or "").strip()
+    # Never resurrect a pending prompt when history already ends with a model reply.
+    if pending_prompt and (
+        (pending_messages and isinstance(pending_messages[-1], dict) and pending_messages[-1].get("role") == "model")
+        or _prompt_already_answered_in_history(pending_prompt, pending_messages)
+    ):
+        clear_pending_turn()
+        pending_prompt = ""
     in_flight = bool(st.session_state.get("prompt_submit_in_flight")) or (
-        bool(pending_prompt) and (not trailing or pending_prompt == trailing)
+        bool(pending_prompt) and bool(trailing) and pending_prompt == trailing
     )
-    if in_flight and (trailing or pending_prompt):
+    if in_flight and trailing:
         prompt = pending_prompt or trailing
         st.session_state.held_chat_prompt = prompt
         st.session_state.prompt_submit_in_flight = True
@@ -6986,7 +7042,9 @@ if not prompt and needs_auto_shadow_catchup():
     set_shadow_debug_logs(catchup_logs)
     if catchup_done:
         mark_auto_shadow_complete()
-    if catchup_staged:
+        # Always remount once after shadow — clears harvest/shadow ghost shells on mobile.
+        should_rerun = True
+    elif catchup_staged:
         should_rerun = True
 
 if prompt:
