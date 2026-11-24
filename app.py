@@ -277,6 +277,29 @@ def _pending_turn_age_seconds(pending):
         return None
 
 
+def _write_messages_history_file(messages, project_name=None):
+    """Write history.json directly (avoid full save_project_state side effects)."""
+    project_name = project_name or st.session_state.get("active_project") or ""
+    if not project_name:
+        return False
+    hist_path = os.path.join(BASE_PROJECT_DIR, project_name, "history.json")
+    try:
+        os.makedirs(os.path.dirname(hist_path), exist_ok=True)
+        payload = [
+            {"role": m.get("role"), "content": m.get("content")}
+            for m in (messages or [])
+            if isinstance(m, dict)
+        ]
+        with open(hist_path, "w", encoding="utf-8") as hist_file:
+            json.dump(payload, hist_file, indent=4)
+            hist_file.flush()
+            os.fsync(hist_file.fileno())
+        return True
+    except Exception as e:
+        print(f"ERROR: history.json write failed: {e}")
+        return False
+
+
 def _discard_trailing_user_message():
     """Remove a dangling last user turn from session + disk history."""
     messages = st.session_state.get("messages")
@@ -287,82 +310,40 @@ def _discard_trailing_user_message():
         return False
     messages.pop()
     st.session_state.messages = messages
-    try:
-        save = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
-        if "loaded_slots_metadata" in st.session_state:
-            save["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
-        save["messages"] = messages
-        save_project_state(save, st.session_state.active_project, silent=True)
-    except Exception as e:
-        print(f"ERROR: discard trailing user save failed: {e}")
+    _write_messages_history_file(messages)
     return True
 
 
 def reconcile_stale_chat_turn():
     """Drop leftover pending_turn / hold flags / dangling user turns.
 
-    Mobile restarts often keep pending_turn.json or an early-saved user bubble
-    after the user has already moved on, which resurfaces as 'Sending…' or a
-    stale unanswered banner. Returns True if state was cleaned (caller may rerun).
+    Any last-user bubble that is not from an explicit submit on THIS run is
+    treated as abandoned and removed — that banner was always stale in practice.
     """
     cleaned = False
+    # Active send this run — leave the in-flight user bubble alone.
+    if st.session_state.get("_chat_submit_this_run"):
+        return False
+
     messages = st.session_state.get("messages") or []
     pending = read_pending_turn()
     pending_prompt = str((pending or {}).get("prompt") or "").strip()
-    pending_age = _pending_turn_age_seconds(pending)
-    # Anything older than this is treated as abandoned (user already moved on).
-    stale_after_sec = 120
-    pending_is_stale = pending_age is None or pending_age > stale_after_sec
 
     last = messages[-1] if messages and isinstance(messages[-1], dict) else None
     last_role = (last or {}).get("role")
-    trailing = ""
-    if last_role == "user":
-        trailing = str(last.get("content") or "").strip()
+    trailing = last_role == "user" and bool(str((last or {}).get("content") or "").strip())
 
-    # Successful reply on disk — never keep Sending / pending around it.
-    if last_role == "model":
-        if pending_prompt:
-            clear_pending_turn()
-            cleaned = True
-        if st.session_state.get("held_chat_prompt") or st.session_state.get("prompt_submit_in_flight"):
-            st.session_state.pop("held_chat_prompt", None)
-            st.session_state.pop("prompt_submit_in_flight", None)
-            cleaned = True
-        return cleaned
-
-    if pending_prompt and _prompt_already_answered_in_history(pending_prompt, messages):
+    if pending_prompt:
         clear_pending_turn()
-        pending_prompt = ""
         cleaned = True
 
-    if pending_prompt and trailing and trailing != pending_prompt:
-        clear_pending_turn()
-        pending_prompt = ""
-        cleaned = True
-
-    # Dangling last-user bubble with no fresh pending → discard (stale partial submit).
-    if trailing and (not pending_prompt or pending_is_stale):
-        if _discard_trailing_user_message():
-            cleaned = True
-        scrub_chat_hold()
-        return cleaned
-
-    # Fresh pending + matching trailing: keep for Resume, but do NOT leave
-    # session holds stuck on 'Sending…' across reconnects.
-    if trailing and pending_prompt and not pending_is_stale:
-        if st.session_state.get("prompt_submit_in_flight") or st.session_state.get("held_chat_prompt"):
-            # Only keep holds when this same script run just set them from chat_input.
-            if not st.session_state.get("_chat_submit_this_run"):
-                st.session_state.pop("held_chat_prompt", None)
-                st.session_state.pop("prompt_submit_in_flight", None)
-                cleaned = True
-        return cleaned
-
-    # Orphan hold flags with nothing to send.
     if st.session_state.get("held_chat_prompt") or st.session_state.get("prompt_submit_in_flight"):
-        if not st.session_state.get("_chat_submit_this_run"):
-            scrub_chat_hold()
+        st.session_state.pop("held_chat_prompt", None)
+        st.session_state.pop("prompt_submit_in_flight", None)
+        cleaned = True
+
+    if trailing:
+        if _discard_trailing_user_message():
             cleaned = True
 
     return cleaned
@@ -3902,10 +3883,9 @@ if st.session_state.loaded_project == st.session_state.active_project:
 
 adopt_saved_engine_room_if_needed(st.session_state.active_project)
 
-# Every run: scrub orphan pending_turn so a restart never shows a stale
-# "unanswered / Sending…" strip after the model already replied.
-if reconcile_stale_chat_turn() and not st.session_state.get("held_chat_prompt"):
-    st.rerun()
+# Every run: scrub orphan pending_turn / dangling user bubbles in-place.
+# Do NOT st.rerun() here — a rerun before st.chat_input drops the user's Send.
+reconcile_stale_chat_turn()
 
 # Read the chat box before the sidebar. A sidebar rerun used to clear the
 # box before this widget ran, so the message never reached the API.
@@ -4006,7 +3986,9 @@ if submitted is not None:
             st.session_state.prompt_submit_in_flight = True
             request_chat_autoscroll()
             write_pending_turn(typed)
-            # Draft clear is client-side on Send (resume guard) — no iframe here.
+            # Session-only user bubble for this run. Do NOT write history.json
+            # until the model reply is saved — early disk writes left permanent
+            # "unanswered prompt" ghosts after failed/abandoned sends.
             if not isinstance(st.session_state.get("messages"), list):
                 st.session_state.messages = list(messages) if isinstance(messages, list) else []
             if not (
@@ -4016,26 +3998,6 @@ if submitted is not None:
                 and st.session_state.messages[-1].get("content") == typed
             ):
                 st.session_state.messages.append({"role": "user", "content": typed})
-                try:
-                    hist_path = os.path.join(
-                        BASE_PROJECT_DIR,
-                        st.session_state.active_project,
-                        "history.json",
-                    )
-                    with open(hist_path, "w", encoding="utf-8") as hist_file:
-                        json.dump(
-                            [
-                                {"role": m.get("role"), "content": m.get("content")}
-                                for m in st.session_state.messages
-                                if isinstance(m, dict)
-                            ],
-                            hist_file,
-                            indent=4,
-                        )
-                        hist_file.flush()
-                        os.fsync(hist_file.fileno())
-                except Exception as e:
-                    print(f"ERROR: early history.json save failed: {e}")
 
 
 # --- 5. TOP COMMAND BAR (PROJECT MANAGER) ---
@@ -6353,22 +6315,15 @@ with main_tab_chat:
         col_preview = None
 
     with col_chat:
+        # Last chance: strip abandoned user bubbles before chat paints (no banner).
+        if (
+            not st.session_state.get("_chat_submit_this_run")
+            and reconcile_stale_chat_turn()
+        ):
+            st.rerun()
+
         chat_container = render_project_chat(chat_pane_height(), "chat_earlier_main")
 
-        # Keep send/resume UI inside the chat pane (not below the tabs — that looked
-        # like a second dialogue and hid Thinking/errors away from the conversation).
-        _chat_msgs = st.session_state.get("messages") or []
-        _trailing = ""
-        if (
-            _chat_msgs
-            and isinstance(_chat_msgs[-1], dict)
-            and _chat_msgs[-1].get("role") == "user"
-            and str(_chat_msgs[-1].get("content") or "").strip()
-        ):
-            _trailing = str(_chat_msgs[-1]["content"])
-        _pending_turn = read_pending_turn()
-        _pending_prompt = str((_pending_turn or {}).get("prompt") or "").strip()
-        # Sending strip only while this run actually submitted (chat_input / Resume).
         _in_flight = bool(st.session_state.get("_chat_submit_this_run")) and (
             bool(st.session_state.get("held_chat_prompt"))
             or bool(st.session_state.get("prompt_submit_in_flight"))
@@ -6379,29 +6334,7 @@ with main_tab_chat:
         if _in_flight:
             st.caption("⏳ Sending to the model…")
             if not st.session_state.get("gemini_api_key") and not st.session_state.get("deepseek_api_key"):
-                st.error("No API key loaded in this session. Re-enter it in the sidebar, then tap Resume.")
-        elif _trailing and not _prompt_already_answered_in_history(_trailing, _chat_msgs):
-            _preview = _trailing if len(_trailing) <= 180 else _trailing[:180] + "…"
-            st.warning("Unanswered prompt on disk (reconnect often leaves this behind).")
-            st.caption(_preview)
-            _rcol, _dcol = st.columns(2)
-            with _rcol:
-                if st.button("▶️ Resume unanswered prompt", use_container_width=True, key="resume_unanswered_chat_btn"):
-                    st.session_state._chat_submit_this_run = True
-                    st.session_state.held_chat_prompt = _trailing
-                    st.session_state.prompt_submit_in_flight = True
-                    write_pending_turn(_trailing)
-                    st.session_state.unanswered_attempt = len(_chat_msgs)
-                    st.rerun()
-            with _dcol:
-                if st.button("🗑️ Discard unanswered prompt", use_container_width=True, key="discard_unanswered_chat_btn"):
-                    st.session_state.messages.pop()
-                    scrub_chat_hold()
-                    _save = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
-                    _save["messages"] = st.session_state.messages
-                    save_project_state(_save, st.session_state.active_project)
-                    st.toast("Discarded unanswered prompt.")
-                    st.rerun()
+                st.error("No API key loaded in this session. Re-enter it in the sidebar, then send again.")
 
         # Staging lives here (same tab as chat) — not above the tabs.
         render_staging_area()
