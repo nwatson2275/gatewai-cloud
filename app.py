@@ -5379,8 +5379,16 @@ with st.sidebar:
             key=auto_shadow_key,
         )
         if auto_shadow_on != bool(st.session_state.auto_shadow_active):
+            turning_on = bool(auto_shadow_on) and not bool(st.session_state.auto_shadow_active)
             st.session_state.auto_shadow_active = auto_shadow_on
             persist_engine_room_settings(st.session_state.active_project)
+            if turning_on:
+                # Catch-up on this same paint left a pale double shell on mobile.
+                st.session_state._defer_auto_shadow_catchup = True
+                st.session_state.pending_auto_shadow = True
+            # Remount immediately after the toggle — continuing the sidebar/main
+            # paint in the same transition was stacking ghost UI on phones.
+            st.rerun()
 
         # --- [NEW] DATA LIFECYCLE CONTROLS ---
         st.markdown('<div class="section-header">DATA LIFECYCLE</div>', unsafe_allow_html=True)
@@ -7071,16 +7079,27 @@ should_rerun = False
 
 # Catch up auto-shadow if chat saved but the prior request died mid-shadow (common on mobile).
 if not prompt and needs_auto_shadow_catchup():
-    st.session_state.pending_auto_shadow = True
-    set_shadow_debug_logs(["🚦 Auto-shadow catch-up starting…"])
-    catchup_logs, catchup_staged, catchup_done = run_auto_shadow_turn()
-    set_shadow_debug_logs(catchup_logs)
-    if catchup_done:
-        mark_auto_shadow_complete()
-        # Always remount once after shadow — clears harvest/shadow ghost shells on mobile.
+    # After enabling Auto Shadow, wait one clean remount before the long run.
+    if st.session_state.pop("_defer_auto_shadow_catchup", None):
+        st.session_state.pending_auto_shadow = True
+        set_shadow_debug_logs([
+            "🕵️ Auto Shadow enabled — refreshing once, then catch-up runs.",
+        ])
         should_rerun = True
-    elif catchup_staged:
-        should_rerun = True
+    else:
+        st.session_state.pending_auto_shadow = True
+        set_shadow_debug_logs(["🚦 Auto-shadow catch-up starting…"])
+        catchup_logs, catchup_staged, catchup_done = run_auto_shadow_turn()
+        set_shadow_debug_logs(catchup_logs)
+        if catchup_done:
+            mark_auto_shadow_complete()
+            # Always remount once after shadow — clears harvest/shadow ghost shells on mobile.
+            should_rerun = True
+        elif catchup_staged:
+            should_rerun = True
+        else:
+            # Remount even when nothing staged — long spinner still leaves pale shells.
+            should_rerun = True
 
 if prompt:
     response = None
