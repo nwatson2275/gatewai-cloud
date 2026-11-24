@@ -7268,6 +7268,7 @@ if prompt:
                     if st.session_state.get("held_chat_prompt") == prompt:
                         st.session_state.pop("held_chat_prompt", None)
                     st.session_state.prompt_submit_in_flight = False
+                    st.session_state.pop("_chat_submit_this_run", None)
                     clear_pending_turn()
                     print(f"DEBUG: Appending model response. Current messages length: {len(st.session_state.messages)}")
 
