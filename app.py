@@ -352,7 +352,11 @@ def reconcile_stale_chat_turn():
     stale partial prompt cannot linger after later successful sends.
     """
     cleaned = False
-    in_flight = bool(st.session_state.get("_chat_submit_this_run"))
+    # Include remount-before-model: Submit sets _run_model_after_remount then
+    # st.rerun(); that next pass must keep the trailing user bubble.
+    in_flight = bool(st.session_state.get("_chat_submit_this_run")) or bool(
+        st.session_state.get("_run_model_after_remount")
+    ) or bool(st.session_state.get("prompt_submit_in_flight"))
 
     pending = read_pending_turn()
     if pending and not in_flight:
@@ -4066,7 +4070,6 @@ if submitted is not None:
         if already_answered:
             scrub_chat_hold()
         else:
-            st.session_state._chat_submit_this_run = True
             st.session_state.held_chat_prompt = typed
             st.session_state.prompt_submit_in_flight = True
             request_chat_autoscroll()
@@ -4083,6 +4086,10 @@ if submitted is not None:
                 and st.session_state.messages[-1].get("content") == typed
             ):
                 st.session_state.messages.append({"role": "user", "content": typed})
+            # Remount once before the long model call — calling the API in the
+            # same paint as Submit stacked a pale double shell on mobile.
+            st.session_state._run_model_after_remount = True
+            st.rerun()
 
 
 # --- 5. TOP COMMAND BAR (PROJECT MANAGER) ---
@@ -6411,6 +6418,8 @@ with main_tab_chat:
         # Last chance: strip abandoned user bubbles before chat paints (no banner).
         if (
             not st.session_state.get("_chat_submit_this_run")
+            and not st.session_state.get("_run_model_after_remount")
+            and not st.session_state.get("prompt_submit_in_flight")
             and reconcile_stale_chat_turn()
         ):
             st.rerun()
@@ -6525,13 +6534,14 @@ with main_tab_chat:
 # =========================================================
 with main_tab_editor:
     pin_editor_tab_to_top()
-    # --- [NEW] Toggle for File List Visibility ---
-    show_file_list = st.checkbox("📂 Show File List", value=st.session_state.get('show_file_list', False), help="Toggle visibility of the file list to maximize editor space.")
-    if show_file_list != st.session_state.get('show_file_list', False):
-        st.session_state.show_file_list = show_file_list
-        if not st.session_state.get("held_chat_prompt"):
-            st.rerun()
-
+    # Keyed checkbox only — an extra st.rerun() here reset main tabs back to GateWai.
+    if "show_file_list" not in st.session_state:
+        st.session_state.show_file_list = False
+    show_file_list = st.checkbox(
+        "📂 Show File List",
+        key="show_file_list",
+        help="Toggle visibility of the file list to maximize editor space.",
+    )
 
     if show_file_list:
         col_file_list, col_editor = st.columns([2, 3]) # Wider file list for folders + Active toggles
@@ -6700,12 +6710,14 @@ with main_tab_editor:
     with col_editor:
         st.subheader(f"✏️ {st.session_state.active_project}  ·  {selected_file}")
         st.caption("💡 Pro-Tip: Use Ctrl+F (or Cmd+F on Mac) to search within the editor.")
-        # --- [NEW] CHAT WINDOW TOGGLE ---
-        show_editor_chat = st.checkbox("💬 Show Chat Window", value=st.session_state.get('show_editor_chat', False), help="Display the chat window next to the editor for AI assistance.")
-        if show_editor_chat != st.session_state.get('show_editor_chat', False):
-            st.session_state.show_editor_chat = show_editor_chat
-            if not st.session_state.get("held_chat_prompt"):
-                st.rerun()
+        # Keyed checkbox only — extra st.rerun() was kicking back to the GateWai tab.
+        if "show_editor_chat" not in st.session_state:
+            st.session_state.show_editor_chat = False
+        show_editor_chat = st.checkbox(
+            "💬 Show Chat Window",
+            key="show_editor_chat",
+            help="Display the chat window next to the editor for AI assistance.",
+        )
 
         if show_editor_chat:
             editor_col1, editor_col2 = st.columns([6, 5]) # <--- CRITICAL: Set to 2 columns
@@ -6719,26 +6731,14 @@ with main_tab_editor:
             # Assign the two column objects to individual variables
             col_markdown_preview, col_html_preview = st.columns(2)
 
-            with col_markdown_preview: # Use the first column as a context manager
-                # Markdown Preview Toggle
-                new_markdown_preview_state = st.checkbox("👁️ Toggle Markdown Preview", value=st.session_state.get('show_markdown_preview', False), key="markdown_preview_toggle_editor")
-                if new_markdown_preview_state != st.session_state.get('show_markdown_preview', False):
-                    st.session_state.show_markdown_preview = new_markdown_preview_state
-                    # Make mutually exclusive with HTML preview
-                    if new_markdown_preview_state:
-                        st.session_state.show_html_preview = False
-                    if not st.session_state.get("held_chat_prompt"):
-                        st.rerun()
-            with col_html_preview: # Use the second column as a context manager
-                # HTML Preview Toggle (Modified to be mutually exclusive)
-                new_html_preview_state = st.checkbox("👁️ Toggle HTML Preview", value=st.session_state.get('show_html_preview', False), key="html_preview_toggle_editor")
-                if new_html_preview_state != st.session_state.get('show_html_preview', False):
-                    st.session_state.show_html_preview = new_html_preview_state
-                    # Make mutually exclusive with Markdown preview
-                    if new_html_preview_state:
-                        st.session_state.show_markdown_preview = False
-                    if not st.session_state.get("held_chat_prompt"):
-                        st.rerun()
+            with col_markdown_preview:
+                if "show_markdown_preview" not in st.session_state:
+                    st.session_state.show_markdown_preview = False
+                st.checkbox("👁️ Toggle Markdown Preview", key="show_markdown_preview")
+            with col_html_preview:
+                if "show_html_preview" not in st.session_state:
+                    st.session_state.show_html_preview = False
+                st.checkbox("👁️ Toggle HTML Preview", key="show_html_preview")
             # --- END NEW: Preview Toggles ---
 
             # --- Initialize Session State ---
@@ -7051,9 +7051,13 @@ with main_tab_editor:
             pass
 
 # --- 9. CHAT + AUTO-SHADOW (AFTER both tabs so Editor always mounts before the API call) ---
+# After Submit we remount once, then run the model on this following pass.
+if st.session_state.pop("_run_model_after_remount", None):
+    st.session_state._chat_submit_this_run = True
+
 prompt = st.session_state.get("held_chat_prompt")
 # Do not silently resurrect pending_turn into a send — that left mobile stuck on
-# "Sending…". Only chat_input / Resume (both set _chat_submit_this_run) may send.
+# "Sending…". Only an explicit Submit remount (_run_model_after_remount) may send.
 if prompt and not st.session_state.get("_chat_submit_this_run"):
     # Hold leftover from a prior run without an explicit send this run.
     prompt = None
