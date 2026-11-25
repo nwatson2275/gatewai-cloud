@@ -564,36 +564,38 @@ st.markdown(
             --gatewai-right-chrome: calc(var(--gatewai-lp-width) + var(--gatewai-rsb-width));
         }
         /*
-          Streamlit's main/bottom panes are often position:absolute with right:0, so
-          padding on .stApp is ignored and content paints under the fixed right chrome.
-          Explicitly inset those panes by --gatewai-right-chrome.
+          Streamlit main/bottom are often position:absolute/fixed with right:0.
+          Inset with right only — do NOT also force max-width:100vw-chrome on the
+          bottom bar (that + width:100% + overflow:hidden was eating the prompt box).
         */
         .stApp {
             box-sizing: border-box !important;
-            overflow-x: hidden !important;
         }
         [data-testid="stAppViewContainer"] {
-            width: calc(100vw - var(--gatewai-right-chrome)) !important;
-            max-width: calc(100vw - var(--gatewai-right-chrome)) !important;
+            width: calc(100% - var(--gatewai-right-chrome)) !important;
+            max-width: calc(100% - var(--gatewai-right-chrome)) !important;
             box-sizing: border-box !important;
-            overflow-x: hidden !important;
             transition: width 0.12s ease, max-width 0.12s ease;
-        }
-        [data-testid="stHeader"],
-        [data-testid="stToolbar"],
-        section.main,
-        [data-testid="stMain"],
-        [data-testid="stBottom"],
-        [data-testid="stBottomBlockContainer"],
-        [data-testid="stAppScrollToBottomContainer"] {
-            right: var(--gatewai-right-chrome) !important;
-            max-width: calc(100vw - var(--gatewai-right-chrome)) !important;
-            box-sizing: border-box !important;
-            overflow-x: hidden !important;
         }
         section.main,
         [data-testid="stMain"] {
+            right: var(--gatewai-right-chrome) !important;
             width: auto !important;
+            max-width: none !important;
+            box-sizing: border-box !important;
+            overflow-x: hidden !important;
+        }
+        /* Prompt / bottom bar: only pin the right edge; keep Streamlit's left/width. */
+        [data-testid="stBottom"],
+        [data-testid="stBottomBlockContainer"] {
+            right: var(--gatewai-right-chrome) !important;
+            width: auto !important;
+            max-width: none !important;
+            overflow: visible !important;
+        }
+        [data-testid="stChatInput"] {
+            max-width: 100% !important;
+            box-sizing: border-box !important;
         }
         /* Chat bubbles / long lines must wrap inside the shortened main column. */
         section.main [data-testid="stChatMessage"],
@@ -2432,26 +2434,25 @@ def install_right_sidebar_chrome(open_slots, width_px):
 
   function insetMainFromRightChrome() {{
     // Reinforce CSS against Streamlit emotion absolute right:0 layouts.
+    // Bottom/chat input: set right only — never max-width/width (hides the prompt box).
     const total = rightChromePx();
     doc.documentElement.style.setProperty('--gatewai-right-chrome', total + 'px');
-    const sel = [
-      '[data-testid="stAppViewContainer"]',
-      '[data-testid="stHeader"]',
-      '[data-testid="stToolbar"]',
-      'section.main',
-      '[data-testid="stMain"]',
-      '[data-testid="stBottom"]',
-      '[data-testid="stBottomBlockContainer"]',
-      '[data-testid="stAppScrollToBottomContainer"]'
-    ];
-    sel.forEach(function (s) {{
-      Array.from(doc.querySelectorAll(s)).forEach(function (el) {{
-        el.style.setProperty('right', total + 'px', 'important');
-        el.style.setProperty('max-width', 'calc(100vw - ' + total + 'px)', 'important');
-        if (s === '[data-testid="stAppViewContainer"]') {{
-          el.style.setProperty('width', 'calc(100vw - ' + total + 'px)', 'important');
-        }}
-      }});
+    Array.from(doc.querySelectorAll('[data-testid="stAppViewContainer"]')).forEach(function (el) {{
+      el.style.setProperty('width', 'calc(100% - ' + total + 'px)', 'important');
+      el.style.setProperty('max-width', 'calc(100% - ' + total + 'px)', 'important');
+    }});
+    Array.from(doc.querySelectorAll('section.main, [data-testid="stMain"]')).forEach(function (el) {{
+      el.style.setProperty('right', total + 'px', 'important');
+      el.style.setProperty('width', 'auto', 'important');
+      el.style.removeProperty('max-width');
+    }});
+    Array.from(doc.querySelectorAll(
+      '[data-testid="stBottom"], [data-testid="stBottomBlockContainer"]'
+    )).forEach(function (el) {{
+      el.style.setProperty('right', total + 'px', 'important');
+      el.style.setProperty('width', 'auto', 'important');
+      el.style.setProperty('max-width', 'none', 'important');
+      el.style.setProperty('overflow', 'visible', 'important');
     }});
   }}
 
@@ -2656,22 +2657,22 @@ def install_live_preview_chrome(open_preview, width_px):
     const lp = parseInt(lpRaw, 10);
     const total = (isNaN(rsb) ? 0 : rsb) + (isNaN(lp) ? 0 : lp);
     doc.documentElement.style.setProperty('--gatewai-right-chrome', total + 'px');
-    const sel = [
-      '[data-testid="stAppViewContainer"]',
-      '[data-testid="stHeader"]',
-      'section.main',
-      '[data-testid="stMain"]',
-      '[data-testid="stBottom"]',
-      '[data-testid="stBottomBlockContainer"]'
-    ];
-    sel.forEach(function (s) {{
-      Array.from(doc.querySelectorAll(s)).forEach(function (el) {{
-        el.style.setProperty('right', total + 'px', 'important');
-        el.style.setProperty('max-width', 'calc(100vw - ' + total + 'px)', 'important');
-        if (s === '[data-testid="stAppViewContainer"]') {{
-          el.style.setProperty('width', 'calc(100vw - ' + total + 'px)', 'important');
-        }}
-      }});
+    Array.from(doc.querySelectorAll('[data-testid="stAppViewContainer"]')).forEach(function (el) {{
+      el.style.setProperty('width', 'calc(100% - ' + total + 'px)', 'important');
+      el.style.setProperty('max-width', 'calc(100% - ' + total + 'px)', 'important');
+    }});
+    Array.from(doc.querySelectorAll('section.main, [data-testid="stMain"]')).forEach(function (el) {{
+      el.style.setProperty('right', total + 'px', 'important');
+      el.style.setProperty('width', 'auto', 'important');
+      el.style.removeProperty('max-width');
+    }});
+    Array.from(doc.querySelectorAll(
+      '[data-testid="stBottom"], [data-testid="stBottomBlockContainer"]'
+    )).forEach(function (el) {{
+      el.style.setProperty('right', total + 'px', 'important');
+      el.style.setProperty('width', 'auto', 'important');
+      el.style.setProperty('max-width', 'none', 'important');
+      el.style.setProperty('overflow', 'visible', 'important');
     }});
   }}
 
