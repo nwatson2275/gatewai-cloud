@@ -624,6 +624,22 @@ st.markdown(
             padding: 2.4rem 0.85rem 1.25rem 1rem !important;
             box-sizing: border-box !important;
         }
+        /* Fully tuck away when collapsed — padding/border/drag handle were leaving a sliver. */
+        .gatewai-rsb-panel.gatewai-rsb-collapsed {
+            width: 0 !important;
+            min-width: 0 !important;
+            max-width: 0 !important;
+            padding: 0 !important;
+            border: none !important;
+            overflow: hidden !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+            opacity: 0 !important;
+        }
+        .gatewai-rsb-panel.gatewai-rsb-collapsed .gatewai-rsb-drag,
+        .gatewai-rsb-panel.gatewai-rsb-collapsed #gatewai-rsb-collapse-btn {
+            display: none !important;
+        }
         /* Live Preview sits left of Memory (or at the right edge when Memory is closed). */
         .gatewai-lp-panel {
             position: fixed !important;
@@ -2491,11 +2507,23 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }}
     // Keep the pane mounted (like st.sidebar) — only the width collapses.
     panel.classList.add('gatewai-rsb-panel');
-    panel.style.setProperty('width', px + 'px', 'important');
-    panel.style.visibility = open ? 'visible' : 'hidden';
-    panel.style.pointerEvents = open ? 'auto' : 'none';
-    ensureDrag(panel);
-    ensureCollapseBtn(panel);
+    if (open) {{
+      panel.classList.remove('gatewai-rsb-collapsed');
+      panel.style.setProperty('width', px + 'px', 'important');
+      panel.style.visibility = 'visible';
+      panel.style.pointerEvents = 'auto';
+      panel.style.opacity = '1';
+      ensureDrag(panel);
+      ensureCollapseBtn(panel);
+    }} else {{
+      panel.classList.add('gatewai-rsb-collapsed');
+      panel.style.setProperty('width', '0px', 'important');
+      panel.style.visibility = 'hidden';
+      panel.style.pointerEvents = 'none';
+      panel.style.opacity = '0';
+      const c = doc.getElementById('gatewai-rsb-collapse-btn');
+      if (c) c.style.display = 'none';
+    }}
     ensureExpandBtn();
     insetMainFromRightChrome();
   }}
