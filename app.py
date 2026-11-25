@@ -561,11 +561,34 @@ st.markdown(
         :root {
             --gatewai-rsb-width: 0px;
             --gatewai-lp-width: 0px;
+            --gatewai-right-chrome: calc(var(--gatewai-lp-width) + var(--gatewai-rsb-width));
         }
-        /* Push left sidebar + main (incl. project manager) by both panes combined. */
-        [data-testid="stAppViewContainer"] {
-            margin-right: calc(var(--gatewai-lp-width) + var(--gatewai-rsb-width)) !important;
-            transition: margin-right 0.12s ease;
+        /* Reserve viewport strip for the fixed right panes so chat/messages aren't covered. */
+        .stApp {
+            padding-right: var(--gatewai-right-chrome) !important;
+            box-sizing: border-box !important;
+            transition: padding-right 0.12s ease;
+        }
+        [data-testid="stAppViewContainer"],
+        [data-testid="stAppScrollToBottomContainer"],
+        [data-testid="stHeader"],
+        [data-testid="stBottom"],
+        [data-testid="stBottomBlockContainer"],
+        section.main,
+        [data-testid="stMain"] {
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+        }
+        /* Chat bubbles / long lines must wrap inside the shortened main column. */
+        section.main [data-testid="stChatMessage"],
+        section.main [data-testid="stChatMessage"] * {
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            max-width: 100%;
+        }
+        section.main .block-container {
+            max-width: 100% !important;
+            padding-right: 0.75rem !important;
         }
         .gatewai-rsb-panel {
             position: fixed !important;
