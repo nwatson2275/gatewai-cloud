@@ -7072,13 +7072,21 @@ if answered_already:
 
 should_rerun = False
 
-# Catch up auto-shadow if chat saved but the prior request died mid-shadow (common on mobile).
-if not prompt and needs_auto_shadow_catchup():
-    # After enabling Auto Shadow, wait one clean remount before the long run.
+# After a model reply: one extra remount to clear pale ghost UI, then shadow.
+if not prompt and st.session_state.pop("_post_reply_second_remount", None):
+    should_rerun = True
+    if not needs_auto_shadow_catchup():
+        st.session_state.pop("_defer_auto_shadow_catchup", None)
+    else:
+        set_shadow_debug_logs([
+            "✅ Reply on screen — one more refresh, then auto-shadow.",
+        ])
+elif not prompt and needs_auto_shadow_catchup():
+    # After enabling Auto Shadow / post-reply defer, wait one clean remount first.
     if st.session_state.pop("_defer_auto_shadow_catchup", None):
         st.session_state.pending_auto_shadow = True
         set_shadow_debug_logs([
-            "🕵️ Auto Shadow enabled — refreshing once, then catch-up runs.",
+            "🕵️ Auto Shadow — refreshing once, then catch-up runs.",
         ])
         should_rerun = True
     else:
@@ -7326,14 +7334,15 @@ if prompt:
                     should_rerun = True
                     save_project_state(universal_save_state_dict, st.session_state.active_project, silent=True)
 
-                    # Defer shadow to the NEXT run. Running it here (before rerun) kept
-                    # mobile stuck on the pre-reply UI so users couldn't scroll to the
-                    # model answer until a later glitch refreshed the page.
+                    # Remount #1 paints the reply; remount #2 clears ghost shells
+                    # from the Thinking wait; then auto-shadow may run.
                     st.session_state.pending_auto_shadow = True
                     write_pending_shadow(len(st.session_state.messages))
+                    st.session_state._post_reply_second_remount = True
+                    st.session_state._defer_auto_shadow_catchup = True
                     set_shadow_debug_logs([
-                        "✅ Chat reply saved — refreshing so you can read it.",
-                        "🕵️ Auto-shadow will run right after that refresh.",
+                        "✅ Chat reply saved — refreshing display.",
+                        "🕵️ Auto-shadow will run after the UI settles.",
                     ])
                     request_chat_autoscroll()
 
