@@ -586,82 +586,13 @@ st.markdown(
             max-width: 100%;
         }
         /*
-          FOUC guard: Memory/LP mount in the main column until chrome JS pins them.
-          Hide the shell's element-container and every following sibling; restore
-          only inside the pinned panel (open). Structure-agnostic vs Streamlit nesting.
+          Memory rail = left-sidebar model: CSS owns position from first paint.
+          Never wait for JS class — that gap is the "ghost file list" in main
+          after Staging remounts. Only match the block that *directly* owns the
+          shell (not the main column that merely nests it).
         */
-        [data-testid="element-container"]:has(.gatewai-rsb-shell),
-        [data-testid="element-container"]:has(.gatewai-rsb-shell) ~ * {
-            position: fixed !important;
-            top: 0 !important;
-            right: 0 !important;
-            width: 0 !important;
-            height: 0 !important;
-            max-height: 0 !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: hidden !important;
-            visibility: hidden !important;
-            opacity: 0 !important;
-            pointer-events: none !important;
-            border: none !important;
-            z-index: 0 !important;
-        }
-        .gatewai-rsb-panel:not(.gatewai-rsb-collapsed) > [data-testid="element-container"]:has(.gatewai-rsb-shell),
-        .gatewai-rsb-panel:not(.gatewai-rsb-collapsed) > [data-testid="element-container"]:has(.gatewai-rsb-shell) ~ *,
-        .gatewai-rsb-panel:not(.gatewai-rsb-collapsed) > div > [data-testid="element-container"]:has(.gatewai-rsb-shell),
-        .gatewai-rsb-panel:not(.gatewai-rsb-collapsed) > div > [data-testid="element-container"]:has(.gatewai-rsb-shell) ~ * {
-            position: static !important;
-            width: auto !important;
-            height: auto !important;
-            max-height: none !important;
-            margin: unset !important;
-            padding: unset !important;
-            overflow: visible !important;
-            visibility: visible !important;
-            opacity: 1 !important;
-            pointer-events: auto !important;
-            border: unset !important;
-            z-index: auto !important;
-        }
-        [data-testid="element-container"]:has(.gatewai-lp-shell),
-        [data-testid="element-container"]:has(.gatewai-lp-shell) ~ * {
-            position: fixed !important;
-            top: 0 !important;
-            right: 0 !important;
-            width: 0 !important;
-            height: 0 !important;
-            max-height: 0 !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: hidden !important;
-            visibility: hidden !important;
-            opacity: 0 !important;
-            pointer-events: none !important;
-            border: none !important;
-            z-index: 0 !important;
-        }
-        .gatewai-lp-panel > [data-testid="element-container"]:has(.gatewai-lp-shell),
-        .gatewai-lp-panel > [data-testid="element-container"]:has(.gatewai-lp-shell) ~ *,
-        .gatewai-lp-panel > div > [data-testid="element-container"]:has(.gatewai-lp-shell),
-        .gatewai-lp-panel > div > [data-testid="element-container"]:has(.gatewai-lp-shell) ~ * {
-            position: static !important;
-            width: auto !important;
-            height: auto !important;
-            max-height: none !important;
-            margin: unset !important;
-            padding: unset !important;
-            overflow: visible !important;
-            visibility: visible !important;
-            opacity: 1 !important;
-            pointer-events: auto !important;
-            border: unset !important;
-            z-index: auto !important;
-        }
-        /* One-shot veil on browser refresh — parent flag skips Streamlit reruns. */
-        html.gatewai-booting [data-testid="stMain"] {
-            opacity: 0 !important;
-        }
+        [data-testid="stVerticalBlock"]:has(> [data-testid="element-container"] .gatewai-rsb-shell),
+        [data-testid="stVerticalBlock"]:has(> div > [data-testid="element-container"] .gatewai-rsb-shell),
         .gatewai-rsb-panel {
             position: fixed !important;
             top: 0 !important;
@@ -674,14 +605,13 @@ st.markdown(
             overflow-x: hidden !important;
             overflow-y: auto !important;
             z-index: 1000100 !important;
-            /* Extra top padding mirrors stSidebarHeader room for the chevron. */
             padding: 2.4rem 0.85rem 1.25rem 1rem !important;
             box-sizing: border-box !important;
-            visibility: visible !important;
-            opacity: 1 !important;
-            pointer-events: auto !important;
+            margin: 0 !important;
         }
-        /* Fully tuck away when collapsed — padding/border/drag handle were leaving a sliver. */
+        html.gatewai-rsb-closed [data-testid="stVerticalBlock"]:has(> [data-testid="element-container"] .gatewai-rsb-shell),
+        html.gatewai-rsb-closed [data-testid="stVerticalBlock"]:has(> div > [data-testid="element-container"] .gatewai-rsb-shell),
+        html.gatewai-rsb-closed .gatewai-rsb-panel,
         .gatewai-rsb-panel.gatewai-rsb-collapsed {
             width: 0 !important;
             min-width: 0 !important;
@@ -693,11 +623,15 @@ st.markdown(
             pointer-events: none !important;
             opacity: 0 !important;
         }
+        html.gatewai-rsb-closed .gatewai-rsb-drag,
+        html.gatewai-rsb-closed #gatewai-rsb-collapse-btn,
         .gatewai-rsb-panel.gatewai-rsb-collapsed .gatewai-rsb-drag,
         .gatewai-rsb-panel.gatewai-rsb-collapsed #gatewai-rsb-collapse-btn {
             display: none !important;
         }
-        /* Live Preview sits left of Memory (or at the right edge when Memory is closed). */
+        /* Live Preview — same left-sidebar model (CSS-fixed from first paint). */
+        [data-testid="stVerticalBlock"]:has(> [data-testid="element-container"] .gatewai-lp-shell),
+        [data-testid="stVerticalBlock"]:has(> div > [data-testid="element-container"] .gatewai-lp-shell),
         .gatewai-lp-panel {
             position: fixed !important;
             top: 0 !important;
@@ -712,9 +646,20 @@ st.markdown(
             z-index: 1000090 !important;
             padding: 0.75rem 0.85rem 1.25rem 1rem !important;
             box-sizing: border-box !important;
-            visibility: visible !important;
-            opacity: 1 !important;
-            pointer-events: auto !important;
+            margin: 0 !important;
+        }
+        html.gatewai-lp-closed [data-testid="stVerticalBlock"]:has(> [data-testid="element-container"] .gatewai-lp-shell),
+        html.gatewai-lp-closed [data-testid="stVerticalBlock"]:has(> div > [data-testid="element-container"] .gatewai-lp-shell),
+        html.gatewai-lp-closed .gatewai-lp-panel {
+            width: 0 !important;
+            min-width: 0 !important;
+            max-width: 0 !important;
+            padding: 0 !important;
+            border: none !important;
+            overflow: hidden !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+            opacity: 0 !important;
         }
         .gatewai-rsb-drag,
         .gatewai-lp-drag {
@@ -830,14 +775,21 @@ st.markdown(
 
 
 _FORCE_GATEWAI_COOKIE = "gatewai_force_gatewai"
+_RSB_WIDTH_COOKIE = "gatewai_rsb_width"
+_RSB_WIDTH_LS = "gatewai_rsb_width"
+_RSB_OPEN_COOKIE = "gatewai_rsb_open"
+_RSB_OPEN_LS = "gatewai_rsb_open"
+_RSB_DEFAULT_WIDTH_PX = 320
+_RSB_MIN_WIDTH_PX = 220
+_RSB_MAX_WIDTH_PX = 560
 
 
 def install_boot_veil():
-    """Hide main pane for one browser navigation/reload until right-rail chrome pins.
+    """Early right-rail CSS vars (left-sidebar model) + refresh → GateWai stamp.
 
-    Parent-window flag survives Streamlit reruns so normal clicks do not flicker.
-    pagehide stamps a cookie so the next Python run can force GateWai after refresh
-    (Streamlit may otherwise restore Editor from the prior WebSocket session).
+    Applies --gatewai-rsb-width / html.gatewai-rsb-closed from localStorage before
+    Memory widgets paint, so the rail is fixed on the right from first frame —
+    never a ghost in the main column after Staging remounts.
     """
     components.html(
         f"""
@@ -845,13 +797,33 @@ def install_boot_veil():
 (function () {{
   const w = window.parent;
   const doc = w.document;
+  const html = doc.documentElement;
   const FLAG = '__gatewaiBootVeilHook';
+  const OPEN_LS = '{_RSB_OPEN_LS}';
+  const WIDTH_LS = '{_RSB_WIDTH_LS}';
+  const MIN_W = {_RSB_MIN_WIDTH_PX};
+  const MAX_W = {_RSB_MAX_WIDTH_PX};
+  const DEF_W = {_RSB_DEFAULT_WIDTH_PX};
 
-  function clearBoot() {{
-    try {{ doc.documentElement.classList.remove('gatewai-booting'); }} catch (e) {{}}
+  // Mirror st.sidebar: width/open known before widgets exist.
+  let open = true;
+  try {{
+    const saved = w.localStorage.getItem(OPEN_LS);
+    if (saved === '0' || saved === '1') open = (saved === '1');
+  }} catch (e) {{}}
+  let widthPx = DEF_W;
+  try {{
+    const ls = parseInt(w.localStorage.getItem(WIDTH_LS) || '', 10);
+    if (ls) widthPx = Math.max(MIN_W, Math.min(MAX_W, ls));
+  }} catch (e) {{}}
+  html.style.setProperty('--gatewai-rsb-width', open ? (widthPx + 'px') : '0px');
+  html.classList.toggle('gatewai-rsb-closed', !open);
+  html.classList.add('gatewai-lp-closed');
+
+  w.__gatewaiBootClear = function () {{
+    try {{ html.classList.remove('gatewai-booting'); }} catch (e) {{}}
     w.__gatewaiBootVeilDone = true;
-  }}
-  w.__gatewaiBootClear = clearBoot;
+  }};
 
   if (!w[FLAG]) {{
     w[FLAG] = true;
@@ -864,10 +836,6 @@ def install_boot_veil():
     w.addEventListener('pagehide', stamp);
     w.addEventListener('beforeunload', stamp);
   }}
-
-  if (w.__gatewaiBootVeilDone) return;
-  try {{ doc.documentElement.classList.add('gatewai-booting'); }} catch (e) {{}}
-  setTimeout(clearBoot, 700);
 }})();
 </script>
         """,
@@ -2228,15 +2196,6 @@ ENGINE_ROOM_FIELDS = (
 )
 
 
-_RSB_WIDTH_COOKIE = "gatewai_rsb_width"
-_RSB_WIDTH_LS = "gatewai_rsb_width"
-_RSB_OPEN_COOKIE = "gatewai_rsb_open"
-_RSB_OPEN_LS = "gatewai_rsb_open"
-_RSB_DEFAULT_WIDTH_PX = 320
-_RSB_MIN_WIDTH_PX = 220
-_RSB_MAX_WIDTH_PX = 560
-
-
 def _clamp_rsb_width_px(raw):
     """Normalize width: legacy percent (≤48) → px; otherwise clamp pixel width."""
     try:
@@ -2398,10 +2357,11 @@ def memory_slots_width_px():
 
 
 def install_right_sidebar_chrome(open_slots, width_px):
-    """Fix Memory panel to the viewport right — collapse/expand like Streamlit's left sidebar.
+    """Memory rail like st.sidebar: CSS-fixed from first paint; JS only open/width.
 
-    Open/close is CSS + localStorage only (no Streamlit remount), so GateWai chat
-    keeps its scroll position the same way the left sidebar does.
+    Staging remounts used to leave the file list in main for ~50ms (ghost) while
+    JS waited to add a class. CSS :has(.gatewai-rsb-shell) owns position; we mount
+    synchronously when the shell appears.
     """
     open_js = "true" if open_slots else "false"
     width_px = int(_clamp_rsb_width_px(width_px))
@@ -2411,6 +2371,7 @@ def install_right_sidebar_chrome(open_slots, width_px):
 (function () {{
   const w = window.parent;
   const doc = w.document;
+  const html = doc.documentElement;
   const WIDTH = {width_px};
   const MIN_W = {_RSB_MIN_WIDTH_PX};
   const MAX_W = {_RSB_MAX_WIDTH_PX};
@@ -2418,9 +2379,8 @@ def install_right_sidebar_chrome(open_slots, width_px):
   const COOKIE = '{_RSB_WIDTH_COOKIE}';
   const OPEN_LS = '{_RSB_OPEN_LS}';
   const OPEN_COOKIE = '{_RSB_OPEN_COOKIE}';
-  const FLAG = '__gatewaiRightSidebarChromeV3';
+  const FLAG = '__gatewaiRightSidebarChromeV4';
 
-  // Client-owned open state (mirrors Streamlit left sidebar — no Python rerun).
   let open = {open_js};
   try {{
     const saved = w.localStorage.getItem(OPEN_LS);
@@ -2463,7 +2423,17 @@ def install_right_sidebar_chrome(open_slots, width_px):
   }}
 
   function findPanel() {{
-    const shell = doc.querySelector('.gatewai-rsb-shell');
+    // Prefer a shell that is still inside main (fresh remount); else body-hosted.
+    const shells = Array.from(doc.querySelectorAll('.gatewai-rsb-shell'));
+    let shell = null;
+    for (let i = 0; i < shells.length; i++) {{
+      const s = shells[i];
+      if (s.closest('[data-testid="stMain"]') || s.closest('section.main')) {{
+        shell = s;
+        break;
+      }}
+    }}
+    if (!shell) shell = shells[shells.length - 1] || null;
     if (!shell) return null;
     let el = shell.closest('[data-testid="stVerticalBlock"]');
     if (!el) return shell.closest('[data-testid="element-container"]') || shell.parentElement;
@@ -2479,12 +2449,6 @@ def install_right_sidebar_chrome(open_slots, width_px):
       return shell.closest('[data-testid="element-container"]') || shell.parentElement;
     }}
     return el;
-  }}
-
-  function scrubMisappliedPanels() {{
-    Array.from(doc.querySelectorAll('.gatewai-rsb-panel')).forEach(function (node) {{
-      if (isMainChrome(node)) node.classList.remove('gatewai-rsb-panel');
-    }});
   }}
 
   function makeChevronBtn(id, iconName, title, onClick) {{
@@ -2542,7 +2506,7 @@ def install_right_sidebar_chrome(open_slots, width_px):
     doc.addEventListener('mousemove', function (ev) {{
       if (!_dragging) return;
       widthPx = Math.max(MIN_W, Math.min(MAX_W, Math.round(w.innerWidth - ev.clientX)));
-      doc.documentElement.style.setProperty('--gatewai-rsb-width', widthPx + 'px');
+      html.style.setProperty('--gatewai-rsb-width', widthPx + 'px');
       panel.style.width = widthPx + 'px';
     }});
     doc.addEventListener('mouseup', function () {{
@@ -2562,13 +2526,12 @@ def install_right_sidebar_chrome(open_slots, width_px):
   }}
 
   function rightChromePx() {{
-    const lpRaw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-lp-width');
+    const lpRaw = getComputedStyle(html).getPropertyValue('--gatewai-lp-width');
     const lp = parseInt(lpRaw, 10);
     return (open ? widthPx : 0) + (isNaN(lp) ? 0 : lp);
   }}
 
   function clearPromptBoxInlineStyles() {{
-    // Undo earlier experiments that squashed st.chat_input into a tiny square.
     Array.from(doc.querySelectorAll(
       '[data-testid="stBottom"], [data-testid="stBottomBlockContainer"], [data-testid="stChatInput"]'
     )).forEach(function (el) {{
@@ -2579,9 +2542,8 @@ def install_right_sidebar_chrome(open_slots, width_px):
   }}
 
   function insetMainFromRightChrome() {{
-    // Only the main shell — never touch the stock Streamlit prompt bar.
     const total = rightChromePx();
-    doc.documentElement.style.setProperty('--gatewai-right-chrome', total + 'px');
+    html.style.setProperty('--gatewai-right-chrome', total + 'px');
     clearPromptBoxInlineStyles();
     Array.from(doc.querySelectorAll('[data-testid="stAppViewContainer"]')).forEach(function (el) {{
       el.style.setProperty('width', 'calc(100% - ' + total + 'px)', 'important');
@@ -2632,19 +2594,19 @@ def install_right_sidebar_chrome(open_slots, width_px):
   }}
 
   function applyLayout() {{
-    scrubMisappliedPanels();
     const px = open ? widthPx : 0;
-    doc.documentElement.style.setProperty('--gatewai-rsb-width', px + 'px');
+    // CSS :has(.gatewai-rsb-shell) already position:fixed the rail (left-sidebar
+    // model). JS only drives width/open — never leave a gap where main owns it.
+    html.style.setProperty('--gatewai-rsb-width', px + 'px');
+    html.classList.toggle('gatewai-rsb-closed', !open);
+
     const panel = findPanel();
     if (!panel || isMainChrome(panel)) {{
-      doc.documentElement.style.setProperty('--gatewai-rsb-width', '0px');
-      const c = doc.getElementById('gatewai-rsb-collapse-btn');
-      if (c) c.remove();
       ensureExpandBtn();
       insetMainFromRightChrome();
       return;
     }}
-    // Keep the pane mounted (like st.sidebar) — only the width collapses.
+
     panel.classList.add('gatewai-rsb-panel');
     if (open) {{
       panel.classList.remove('gatewai-rsb-collapsed');
@@ -2665,9 +2627,6 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }}
     ensureExpandBtn();
     insetMainFromRightChrome();
-    try {{
-      if (typeof w.__gatewaiBootClear === 'function') w.__gatewaiBootClear();
-    }} catch (e) {{}}
   }}
 
   function mount() {{
@@ -2677,19 +2636,34 @@ def install_right_sidebar_chrome(open_slots, width_px):
 
   w.__gatewaiRsbMount = mount;
   w.__gatewaiRsbSetOpen = setOpen;
-  function mountSoon() {{
-    if (w.__gatewaiRsbTimer) clearTimeout(w.__gatewaiRsbTimer);
-    w.__gatewaiRsbTimer = setTimeout(function () {{
-      if (typeof w.__gatewaiRsbMount === 'function') w.__gatewaiRsbMount();
-    }}, 50);
+
+  // Sync when shell appears (Staging remount) — no 50ms ghost window.
+  function onDomMutations(mutations) {{
+    if (_dragging) return;
+    for (let i = 0; i < mutations.length; i++) {{
+      const m = mutations[i];
+      for (let j = 0; j < m.addedNodes.length; j++) {{
+        const n = m.addedNodes[j];
+        if (!n || n.nodeType !== 1) continue;
+        if (
+          (n.classList && n.classList.contains('gatewai-rsb-shell')) ||
+          (n.querySelector && n.querySelector('.gatewai-rsb-shell'))
+        ) {{
+          mount();
+          return;
+        }}
+      }}
+    }}
   }}
+
   mount();
+  requestAnimationFrame(mount);
   setTimeout(mount, 120);
-  setTimeout(mount, 500);
+  setTimeout(mount, 400);
   if (!w[FLAG]) {{
     w[FLAG] = true;
     try {{
-      const obs = new MutationObserver(mountSoon);
+      const obs = new MutationObserver(onDomMutations);
       obs.observe(doc.body, {{ childList: true, subtree: true }});
     }} catch (e) {{}}
     w.addEventListener('resize', function () {{
@@ -2893,13 +2867,13 @@ def install_live_preview_chrome(open_preview, width_px):
 
   function mount() {{
     if (_dragging) return;
-    scrubMisappliedPanels();
     let startW = WIDTH;
     try {{
       const ls = parseInt(w.localStorage.getItem(LS_KEY) || '', 10);
       if (ls) startW = Math.max(MIN_W, Math.min(MAX_W, ls));
     }} catch (e) {{}}
     applyWidth(startW);
+    doc.documentElement.classList.toggle('gatewai-lp-closed', !OPEN);
     const panel = findPanel();
     if (OPEN && panel && !isMainChrome(panel)) {{
       panel.classList.add('gatewai-lp-panel');
@@ -2907,27 +2881,37 @@ def install_live_preview_chrome(open_preview, width_px):
       ensureDrag(panel);
     }} else {{
       if (panel) panel.classList.remove('gatewai-lp-panel');
-      if (!OPEN || !panel || isMainChrome(panel)) {{
-        doc.documentElement.style.setProperty('--gatewai-lp-width', '0px');
-      }}
+      doc.documentElement.style.setProperty('--gatewai-lp-width', '0px');
+      doc.documentElement.classList.add('gatewai-lp-closed');
     }}
     insetMainFromRightChrome();
   }}
 
   w.__gatewaiLpMount = mount;
-  function mountSoon() {{
-    if (w.__gatewaiLpTimer) clearTimeout(w.__gatewaiLpTimer);
-    w.__gatewaiLpTimer = setTimeout(function () {{
-      if (typeof w.__gatewaiLpMount === 'function') w.__gatewaiLpMount();
-    }}, 50);
+  function onLpMutations(mutations) {{
+    if (_dragging) return;
+    for (let i = 0; i < mutations.length; i++) {{
+      const m = mutations[i];
+      for (let j = 0; j < m.addedNodes.length; j++) {{
+        const n = m.addedNodes[j];
+        if (!n || n.nodeType !== 1) continue;
+        if (
+          (n.classList && n.classList.contains('gatewai-lp-shell')) ||
+          (n.querySelector && n.querySelector('.gatewai-lp-shell'))
+        ) {{
+          mount();
+          return;
+        }}
+      }}
+    }}
   }}
   mount();
+  requestAnimationFrame(mount);
   setTimeout(function () {{ if (w.__gatewaiLpMount) w.__gatewaiLpMount(); }}, 120);
-  setTimeout(function () {{ if (w.__gatewaiLpMount) w.__gatewaiLpMount(); }}, 500);
   if (!w[FLAG]) {{
     w[FLAG] = true;
     try {{
-      const obs = new MutationObserver(mountSoon);
+      const obs = new MutationObserver(onLpMutations);
       obs.observe(doc.body, {{ childList: true, subtree: true }});
     }} catch (e) {{}}
   }}
