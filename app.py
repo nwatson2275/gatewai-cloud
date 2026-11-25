@@ -651,21 +651,14 @@ st.markdown(
             left: 0.35rem !important;
             z-index: 1000105 !important;
         }
-        /* Expand: top-right of app header — mirror of stExpandSidebarButton (top-left). */
-        #gatewai-rsb-expand-btn.gatewai-rsb-expand-in-header {
-            position: relative !important;
-            top: auto !important;
-            right: auto !important;
-            margin-left: auto !important;
-            z-index: 1000200 !important;
-        }
-        #gatewai-rsb-expand-btn.gatewai-rsb-expand-floating {
+        /* Expand: fixed top-right, same header band as stExpandSidebarButton. */
+        #gatewai-rsb-expand-btn {
             position: fixed !important;
             top: 0.35rem !important;
             right: 0.55rem !important;
             z-index: 1000200 !important;
         }
-        /* Hidden Streamlit click targets driven by the mirrored chevron buttons. */
+        /* Decoy Streamlit << / >> targets — markers only; JS also hides the real buttons. */
         div.gatewai-rsb-expand,
         div.gatewai-rsb-collapse-target {
             position: absolute !important;
@@ -2186,12 +2179,40 @@ def install_right_sidebar_chrome(open_slots, width_px):
     return el;
   }}
 
+  function isDecoyChevron(btn) {{
+    if (!btn || btn.classList.contains('gatewai-rsb-chevron-btn')) return false;
+    const t = (btn.innerText || '').trim();
+    return t === '<<' || t === '>>';
+  }}
+
+  function hideDecoyChevrons() {{
+    // Streamlit does not nest widgets inside our markdown wrappers, so the decoy
+    // << / >> buttons otherwise sit in the main column under GateWai/Editor.
+    Array.from(doc.querySelectorAll('button')).forEach(function (b) {{
+      if (!isDecoyChevron(b)) return;
+      const wrap = b.closest('[data-testid="stButton"]')
+        || b.closest('[data-testid="element-container"]')
+        || b.parentElement;
+      if (wrap) {{
+        wrap.style.display = 'none';
+        wrap.style.height = '0';
+        wrap.style.margin = '0';
+        wrap.style.padding = '0';
+        wrap.style.overflow = 'hidden';
+      }}
+      b.style.display = 'none';
+    }});
+  }}
+
   function clickStreamlitTarget(kind) {{
-    // Hidden Streamlit buttons keyed by label text.
     const want = kind === 'collapse' ? '<<' : '>>';
     const btn = Array.from(doc.querySelectorAll('button'))
-      .find(b => (b.innerText || '').trim() === want);
-    if (btn) btn.click();
+      .find(b => isDecoyChevron(b) && (b.innerText || '').trim() === want);
+    if (btn) {{
+      // Temporarily allow the click even if display:none.
+      btn.style.display = '';
+      btn.click();
+    }}
   }}
 
   function makeChevronBtn(id, iconName, title, onClick) {{
@@ -2208,6 +2229,22 @@ def install_right_sidebar_chrome(open_slots, width_px):
     btn.title = title;
     btn.setAttribute('aria-label', title);
     return btn;
+  }}
+
+  function alignExpandWithLeftHeader(btn) {{
+    // Match the left sidebar expand/collapse vertical position exactly.
+    const leftBtn = doc.querySelector('[data-testid="stExpandSidebarButton"]')
+      || doc.querySelector('[data-testid="stSidebarCollapseButton"] button')
+      || doc.querySelector('[data-testid="stSidebarCollapseButton"]')
+      || doc.querySelector('[data-testid="stHeader"]');
+    let topPx = 6;
+    if (leftBtn) {{
+      const r = leftBtn.getBoundingClientRect();
+      const h = btn.getBoundingClientRect().height || 32;
+      topPx = Math.max(2, Math.round(r.top + (r.height - h) / 2));
+    }}
+    btn.style.top = topPx + 'px';
+    btn.style.right = '0.55rem';
   }}
 
   let _dragging = false;
@@ -2264,8 +2301,6 @@ def install_right_sidebar_chrome(open_slots, width_px):
     let btn = doc.getElementById('gatewai-rsb-expand-btn');
     if (OPEN) {{
       if (btn) btn.remove();
-      const c = doc.getElementById('gatewai-rsb-collapse-btn');
-      // collapse btn lives on the panel; leave it when open
       return;
     }}
     // keyboard_double_arrow_left — expand from the right (mirror of left sidebar's right arrows).
@@ -2275,22 +2310,13 @@ def install_right_sidebar_chrome(open_slots, width_px):
       'Expand Memory slots sidebar',
       function () {{ clickStreamlitTarget('expand'); }}
     );
-    // Prefer parking it in the app header (same strip as stExpandSidebarButton).
-    const toolbar = doc.querySelector('[data-testid="stToolbar"]')
-      || doc.querySelector('[data-testid="stHeader"]');
-    if (toolbar) {{
-      if (btn.parentElement !== toolbar) toolbar.appendChild(btn);
-      btn.classList.add('gatewai-rsb-expand-in-header');
-      btn.classList.remove('gatewai-rsb-expand-floating');
-    }} else {{
-      if (btn.parentElement !== doc.body) doc.body.appendChild(btn);
-      btn.classList.add('gatewai-rsb-expand-floating');
-      btn.classList.remove('gatewai-rsb-expand-in-header');
-    }}
+    if (btn.parentElement !== doc.body) doc.body.appendChild(btn);
+    alignExpandWithLeftHeader(btn);
   }}
 
   function mount() {{
     if (_dragging) return;
+    hideDecoyChevrons();
     // Prefer last dragged width from localStorage over the Python snapshot.
     let startW = WIDTH;
     try {{
@@ -2331,6 +2357,10 @@ def install_right_sidebar_chrome(open_slots, width_px):
       const obs = new MutationObserver(mountSoon);
       obs.observe(doc.body, {{ childList: true, subtree: true }});
     }} catch (e) {{}}
+    w.addEventListener('resize', function () {{
+      const btn = doc.getElementById('gatewai-rsb-expand-btn');
+      if (btn) alignExpandWithLeftHeader(btn);
+    }});
   }}
 }})();
 </script>
