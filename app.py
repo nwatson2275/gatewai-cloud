@@ -585,6 +585,47 @@ st.markdown(
             word-break: break-word;
             max-width: 100%;
         }
+        /*
+          FOUC guard: Memory/LP widgets mount in the main column until chrome JS
+          adds .gatewai-rsb-panel / .gatewai-lp-panel. Hide that in-flow block so
+          refresh does not flash a file-list "Editor" in the middle.
+          Only match the vertical block that *directly* owns the shell marker —
+          not the main column (which merely nests it).
+        */
+        [data-testid="stVerticalBlock"]:not(.gatewai-rsb-panel):has(> [data-testid="element-container"] .gatewai-rsb-shell),
+        [data-testid="stVerticalBlock"]:not(.gatewai-rsb-panel):has(> div > [data-testid="element-container"] .gatewai-rsb-shell) {
+            position: fixed !important;
+            top: 0 !important;
+            right: 0 !important;
+            width: 0 !important;
+            height: 0 !important;
+            max-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            visibility: hidden !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            border: none !important;
+            z-index: 0 !important;
+        }
+        [data-testid="stVerticalBlock"]:not(.gatewai-lp-panel):has(> [data-testid="element-container"] .gatewai-lp-shell),
+        [data-testid="stVerticalBlock"]:not(.gatewai-lp-panel):has(> div > [data-testid="element-container"] .gatewai-lp-shell) {
+            position: fixed !important;
+            top: 0 !important;
+            right: 0 !important;
+            width: 0 !important;
+            height: 0 !important;
+            max-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            visibility: hidden !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            border: none !important;
+            z-index: 0 !important;
+        }
         .gatewai-rsb-panel {
             position: fixed !important;
             top: 0 !important;
@@ -600,6 +641,9 @@ st.markdown(
             /* Extra top padding mirrors stSidebarHeader room for the chevron. */
             padding: 2.4rem 0.85rem 1.25rem 1rem !important;
             box-sizing: border-box !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
         }
         /* Fully tuck away when collapsed — padding/border/drag handle were leaving a sliver. */
         .gatewai-rsb-panel.gatewai-rsb-collapsed {
@@ -632,6 +676,9 @@ st.markdown(
             z-index: 1000090 !important;
             padding: 0.75rem 0.85rem 1.25rem 1rem !important;
             box-sizing: border-box !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
         }
         .gatewai-rsb-drag,
         .gatewai-lp-drag {
@@ -7528,9 +7575,11 @@ main_view = st.radio(
     label_visibility="collapsed",
 )
 
+# Install chrome before the Memory widgets paint so the MutationObserver can
+# pin the rail as soon as the shell marker appears (CSS FOUC guard covers the gap).
+install_right_sidebar_chrome(_show_slots if _use_app_rsb else False, _rsb_width)
 if _use_app_rsb:
     render_app_memory_sidebar()
-install_right_sidebar_chrome(_show_slots if _use_app_rsb else False, _rsb_width)
 
 # =========================================================
 # VIEW 1: GateWai (Chat & Artifacts)
