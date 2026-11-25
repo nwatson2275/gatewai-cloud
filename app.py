@@ -1928,6 +1928,41 @@ ENGINE_ROOM_FIELDS = (
     ("last_harvest_message_index", "last_harvest_message_index"),
 )
 
+
+def persist_ui_layout_prefs(project_name=None):
+    """Write GateWai/Editor layout toggles into config.json (survive refresh)."""
+    project_name = project_name or st.session_state.get("active_project") or ""
+    if not project_name:
+        return
+    path = os.path.join(BASE_PROJECT_DIR, project_name, "config.json")
+    existing, unreadable = read_project_config(project_name)
+    if unreadable:
+        return
+    existing["gatewai_show_slots"] = bool(
+        st.session_state.get("gatewai_show_slots_pref", st.session_state.get("gatewai_show_slots", False))
+    )
+    existing["show_file_list"] = bool(
+        st.session_state.get("show_file_list_pref", st.session_state.get("show_file_list", False))
+    )
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        print(f"ERROR: persist_ui_layout_prefs failed: {e}")
+
+
+def remember_gatewai_slots_pref():
+    """Keep Memory-slots open/closed across remounts and leaving the GateWai view.
+
+    Streamlit drops widget keys that aren't rendered; switching to Editor (or a
+    post-reply remount race) was clearing the checkbox back to off.
+    """
+    if "gatewai_show_slots" in st.session_state:
+        st.session_state.gatewai_show_slots_pref = bool(st.session_state.gatewai_show_slots)
+        persist_ui_layout_prefs()
+
 def engine_room_widget_key(canonical, project=None):
     project = project if project is not None else st.session_state.get("active_project", "")
     return f"ui::{canonical}::{project}"
@@ -2072,6 +2107,12 @@ def save_project_state(state, name, silent=False):
                 "last_harvest_message_index": saved_config_value("last_harvest_message_index", "last_harvest_message_index", 0),
                 "review_mode_active": saved_config_value("review_mode_active", "review_mode_active", True),
                 "auto_shadow_active": saved_config_value("auto_shadow_active", "auto_shadow_active", True),
+                "gatewai_show_slots": saved_config_value(
+                    "gatewai_show_slots_pref", "gatewai_show_slots", False
+                ),
+                "show_file_list": saved_config_value(
+                    "show_file_list_pref", "show_file_list", False
+                ),
             }
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config_data, f, indent=4)
@@ -4089,6 +4130,11 @@ if st.session_state.loaded_project != st.session_state.active_project:
         st.session_state[f"auto_shadow_toggle::{st.session_state.active_project}"] = bool(
             st.session_state.auto_shadow_active
         )
+        # Layout prefs — restore into durable prefs + widget keys
+        st.session_state.gatewai_show_slots_pref = bool(cfg.get("gatewai_show_slots", False))
+        st.session_state.gatewai_show_slots = st.session_state.gatewai_show_slots_pref
+        st.session_state.show_file_list_pref = bool(cfg.get("show_file_list", False))
+        st.session_state.show_file_list = st.session_state.show_file_list_pref
          # --- DEBUG: Print session state after loading ---
 #        print(f"DEBUG LOAD_PROJECT_STATE: st.session_state.last_harvest_message_index set to {st.session_state.last_harvest_message_index}")
     else:
@@ -6580,14 +6626,20 @@ if main_view == _MAIN_GATEWAI:
         st.session_state.get("prompt_submit_in_flight")
     ) or bool(_pending_now_prompt) or bool(st.session_state.get("pending_updates"))
     _mobile = is_mobile_client()
+    # Restore checkbox from durable pref when Streamlit dropped the widget key
+    # (happens when Editor was showing, or after some remounts).
+    if "gatewai_show_slots_pref" not in st.session_state:
+        st.session_state.gatewai_show_slots_pref = False
     if "gatewai_show_slots" not in st.session_state:
-        st.session_state.gatewai_show_slots = False
+        st.session_state.gatewai_show_slots = bool(st.session_state.gatewai_show_slots_pref)
     st.checkbox(
         "📂 Memory slots",
         key="gatewai_show_slots",
         help="Show the memory-slot list beside chat so you can include/exclude files without leaving GateWai.",
+        on_change=remember_gatewai_slots_pref,
     )
-    _show_slots = bool(st.session_state.gatewai_show_slots)
+    st.session_state.gatewai_show_slots_pref = bool(st.session_state.gatewai_show_slots)
+    _show_slots = bool(st.session_state.gatewai_show_slots_pref)
     # Desktop right sidebar; on mobile / busy turns use an expander under chat instead.
     _use_slots_split = _show_slots and not _mobile and not _turn_busy
     # Never split chat/preview on phones — two columns + staging unglues the page.
@@ -6739,14 +6791,23 @@ if main_view == _MAIN_GATEWAI:
 # =========================================================
 else:
     pin_editor_tab_to_top()
-    # Keyed checkbox — selection is kept via main_view_selector radio above.
+    # Keyed checkbox + durable pref (widget key is dropped when Editor isn't mounted).
+    if "show_file_list_pref" not in st.session_state:
+        st.session_state.show_file_list_pref = False
     if "show_file_list" not in st.session_state:
-        st.session_state.show_file_list = False
+        st.session_state.show_file_list = bool(st.session_state.show_file_list_pref)
+
+    def _remember_show_file_list():
+        st.session_state.show_file_list_pref = bool(st.session_state.get("show_file_list", False))
+        persist_ui_layout_prefs()
+
     show_file_list = st.checkbox(
         "📂 Show File List",
         key="show_file_list",
         help="Toggle visibility of the file list to maximize editor space.",
+        on_change=_remember_show_file_list,
     )
+    st.session_state.show_file_list_pref = bool(show_file_list)
 
     if show_file_list:
         col_file_list, col_editor = st.columns([2, 3])
