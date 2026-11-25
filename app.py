@@ -578,6 +578,32 @@ st.markdown(
             right: var(--gatewai-right-chrome) !important;
             box-sizing: border-box !important;
         }
+        /*
+          Toasts / announcements sit above the right Memory rail and shift left
+          by the rail width so "Saved…" and sidebar confirmations are not hidden.
+        */
+        [data-testid="stToast"],
+        [data-testid="stToastContainer"],
+        [data-testid="toastContainer"],
+        div[data-testid="stNotification"],
+        [data-testid="stStatusWidget"],
+        .stToast,
+        .stToastContainer {
+            z-index: 1000400 !important;
+        }
+        [data-testid="stToastContainer"],
+        [data-testid="toastContainer"],
+        .stToastContainer {
+            right: calc(var(--gatewai-right-chrome, 0px) + 0.75rem) !important;
+            left: auto !important;
+            bottom: 1rem !important;
+            max-width: min(24rem, calc(100vw - var(--gatewai-right-chrome, 0px) - 2rem)) !important;
+        }
+        [data-testid="stToast"],
+        .stToast {
+            right: calc(var(--gatewai-right-chrome, 0px) + 0.75rem) !important;
+            left: auto !important;
+        }
         /* Chat bubbles wrap inside the shortened main column. */
         section.main [data-testid="stChatMessage"],
         section.main [data-testid="stChatMessage"] * {
@@ -1268,15 +1294,15 @@ def chat_pane_height(desktop=720, mobile=520):
 def chat_history_container(height):
     """Fixed-height chat pane pinned to the latest message."""
     kwargs = {"height": height}
-    # Right-sidebar expand/collapse remounts chat; don't yank to the latest message.
+    # Right-sidebar / slot-toggle remounts chat; don't yank to the latest message.
     preserve = bool(st.session_state.pop("_preserve_gatewai_chat_scroll", False))
     try:
         import inspect
         if "autoscroll" in inspect.signature(st.container).parameters:
+            # Explicit False — omitting the kwarg still defaults to True on some builds.
+            kwargs["autoscroll"] = not preserve
             if preserve:
                 st.session_state._restore_gatewai_chat_scroll = True
-            else:
-                kwargs["autoscroll"] = True
     except Exception:
         if preserve:
             st.session_state._restore_gatewai_chat_scroll = True
@@ -2299,8 +2325,13 @@ def set_memory_slots_open(open_slots):
 _CHAT_SCROLL_LS = "gatewai_chat_scroll_top"
 
 
-def install_gatewai_chat_scroll_capture():
-    """Keep chat pane Y in sessionStorage so Editor ↔ GateWai can restore it."""
+def install_gatewai_chat_scroll_capture(save_now=True):
+    """Keep chat pane Y in sessionStorage so Editor ↔ GateWai can restore it.
+
+    When restoring, pass save_now=False so a fresh mount at scrollTop 0/bottom
+    cannot overwrite the frozen Y before restore runs.
+    """
+    save_js = "true" if save_now else "false"
     components.html(
         f"""
 <script>
@@ -2309,6 +2340,7 @@ def install_gatewai_chat_scroll_capture():
   const doc = w.document;
   const KEY = '{_CHAT_SCROLL_LS}';
   const FLAG = '__gatewaiChatScrollCapture';
+  const SAVE_NOW = {save_js};
 
   function findChatPane() {{
     const root = doc.querySelector('section.main') || doc;
@@ -2334,6 +2366,7 @@ def install_gatewai_chat_scroll_capture():
   }}
 
   function save() {{
+    if (w.__gatewaiChatScrollRestoring) return;
     const pane = findChatPane();
     if (!pane) return;
     try {{ w.sessionStorage.setItem(KEY, String(pane.scrollTop)); }} catch (e) {{}}
@@ -2347,9 +2380,11 @@ def install_gatewai_chat_scroll_capture():
       if (ev.target === pane || (pane.contains && pane.contains(ev.target))) save();
     }}, true);
   }}
-  save();
-  setTimeout(save, 100);
-  setTimeout(save, 400);
+  if (SAVE_NOW) {{
+    save();
+    setTimeout(save, 100);
+    setTimeout(save, 400);
+  }}
 }})();
 </script>
         """,
@@ -2374,6 +2409,8 @@ def restore_gatewai_chat_scroll_if_needed():
   if (raw === null || raw === '') return;
   const y = parseInt(raw, 10);
   if (isNaN(y)) return;
+
+  w.__gatewaiChatScrollRestoring = true;
 
   function findChatPane() {{
     const root = doc.querySelector('section.main') || doc;
@@ -2406,7 +2443,8 @@ def restore_gatewai_chat_scroll_if_needed():
   }}
   restore();
   requestAnimationFrame(restore);
-  [40, 120, 280, 600, 1200].forEach(function (ms) {{ setTimeout(restore, ms); }});
+  [40, 120, 280, 600, 1200, 2000].forEach(function (ms) {{ setTimeout(restore, ms); }});
+  setTimeout(function () {{ w.__gatewaiChatScrollRestoring = false; }}, 2200);
 }})();
 </script>
         """,
@@ -2451,7 +2489,7 @@ def install_right_sidebar_chrome(open_slots, width_px):
   const COOKIE = '{_RSB_WIDTH_COOKIE}';
   const OPEN_LS = '{_RSB_OPEN_LS}';
   const OPEN_COOKIE = '{_RSB_OPEN_COOKIE}';
-  const FLAG = '__gatewaiRightSidebarChromeV5';
+  const FLAG = '__gatewaiRightSidebarChromeV6';
 
   let open = {open_js};
   try {{
@@ -2604,6 +2642,17 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }});
   }}
 
+  function insetToastsFromRightChrome(total) {{
+    const shift = 'calc(' + total + 'px + 0.75rem)';
+    Array.from(doc.querySelectorAll(
+      '[data-testid="stToastContainer"], [data-testid="toastContainer"], .stToastContainer, [data-testid="stToast"], .stToast'
+    )).forEach(function (el) {{
+      el.style.setProperty('z-index', '1000400', 'important');
+      el.style.setProperty('right', shift, 'important');
+      el.style.setProperty('left', 'auto', 'important');
+    }});
+  }}
+
   function insetMainFromRightChrome() {{
     const total = rightChromePx();
     html.style.setProperty('--gatewai-right-chrome', total + 'px');
@@ -2617,6 +2666,7 @@ def install_right_sidebar_chrome(open_slots, width_px):
       el.style.removeProperty('width');
       el.style.removeProperty('max-width');
     }});
+    insetToastsFromRightChrome(total);
   }}
 
   function ensureCollapseBtn(panel) {{
@@ -2718,8 +2768,19 @@ def install_right_sidebar_chrome(open_slots, width_px):
   w.__gatewaiRsbSetOpen = setOpen;
 
   // Sync when shell appears (Staging remount) — no 50ms ghost window.
+  function isToastNode(n) {{
+    if (!n || n.nodeType !== 1) return false;
+    if (n.matches && n.matches(
+      '[data-testid="stToast"], [data-testid="stToastContainer"], [data-testid="toastContainer"], .stToast, .stToastContainer'
+    )) return true;
+    return !!(n.querySelector && n.querySelector(
+      '[data-testid="stToast"], [data-testid="stToastContainer"], [data-testid="toastContainer"], .stToast, .stToastContainer'
+    ));
+  }}
+
   function onDomMutations(mutations) {{
     if (_dragging) return;
+    let needToast = false;
     for (let i = 0; i < mutations.length; i++) {{
       const m = mutations[i];
       for (let j = 0; j < m.addedNodes.length; j++) {{
@@ -2732,8 +2793,10 @@ def install_right_sidebar_chrome(open_slots, width_px):
           mount();
           return;
         }}
+        if (isToastNode(n)) needToast = true;
       }}
     }}
+    if (needToast) insetMainFromRightChrome();
   }}
 
   mount();
@@ -2881,6 +2944,14 @@ def install_live_preview_chrome(open_preview, width_px):
       el.style.setProperty('right', total + 'px', 'important');
       el.style.removeProperty('width');
       el.style.removeProperty('max-width');
+    }});
+    const shift = 'calc(' + total + 'px + 0.75rem)';
+    Array.from(doc.querySelectorAll(
+      '[data-testid="stToastContainer"], [data-testid="toastContainer"], .stToastContainer, [data-testid="stToast"], .stToast'
+    )).forEach(function (el) {{
+      el.style.setProperty('z-index', '1000400', 'important');
+      el.style.setProperty('right', shift, 'important');
+      el.style.setProperty('left', 'auto', 'important');
     }});
   }}
 
@@ -7823,8 +7894,11 @@ if main_view == _MAIN_GATEWAI:
         st.rerun()
 
     chat_container = render_project_chat(chat_pane_height(), "chat_earlier_main")
-    install_gatewai_chat_scroll_capture()
+    # Restore BEFORE capture — capture must not overwrite the frozen Y with a
+    # fresh mount's scrollTop (0 / bottom) after returning from Editor.
+    _restoring_chat_scroll = bool(st.session_state.get("_restore_gatewai_chat_scroll"))
     restore_gatewai_chat_scroll_if_needed()
+    install_gatewai_chat_scroll_capture(save_now=not _restoring_chat_scroll)
 
     _send_err = st.session_state.pop("chat_send_error", None)
     if _send_err:
