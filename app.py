@@ -1140,84 +1140,66 @@ def snap_chat_panes_to_bottom(force=False):
 
 
 def pin_editor_tab_to_top():
-    """Scroll to top whenever the Editor tab is selected (including later clicks).
+    """Force the main pane to the top whenever the Editor view mounts.
 
-    Streamlit often switches tabs client-side without a script rerun, so a one-shot
-    inject only helps the first open. Install a durable click/MutationObserver hook.
+    Main view is a radio (not st.tabs). ACE focus and Streamlit's scroll-to-bottom
+    container often yank the page down on switch — keep pinning to top for a bit.
     """
     components.html(
         """
 <script>
 (function () {
   const doc = window.parent.document;
-  const FLAG = '__gatewaiEditorPinTopHook';
-  function editorTabEl() {
-    const tabs = doc.querySelectorAll('button[role="tab"], [role="tab"]');
-    for (let i = 0; i < tabs.length; i++) {
-      const t = tabs[i];
-      const label = (t.textContent || '').toLowerCase();
-      if (label.indexOf('editor') !== -1) return t;
-    }
-    return null;
-  }
-  function editorTabActive() {
-    const t = editorTabEl();
-    if (!t) return false;
-    if (t.getAttribute('aria-selected') === 'true') return true;
-    if ((t.className || '').toString().toLowerCase().indexOf('selected') >= 0) return true;
-    return false;
-  }
+  const win = window.parent;
+  const FLAG = '__gatewaiEditorPinTopHookV3';
   function toTop() {
-    if (!editorTabActive()) return;
     const targets = [
       doc.scrollingElement || doc.documentElement,
       doc.body,
       doc.querySelector('[data-testid="stAppScrollToBottomContainer"]'),
       doc.querySelector('section.main'),
       doc.querySelector('[data-testid="stMain"]'),
-      doc.querySelector('[data-testid="stAppViewContainer"]')
+      doc.querySelector('[data-testid="stAppViewContainer"]'),
+      doc.querySelector('.main .block-container')
     ];
     targets.forEach(function (el) {
       if (!el) return;
-      try { el.scrollTop = 0; } catch (e) {}
+      try {
+        el.scrollTop = 0;
+        el.scrollLeft = 0;
+      } catch (e) {}
     });
-    try { window.parent.scrollTo(0, 0); } catch (e) {}
+    try { win.scrollTo(0, 0); } catch (e) {}
   }
   function scheduleTop() {
     toTop();
     requestAnimationFrame(toTop);
-    [30, 80, 160, 320, 600, 1000].forEach(function (ms) {
+    [0, 30, 80, 160, 320, 600, 1000, 1800, 2800].forEach(function (ms) {
       setTimeout(toTop, ms);
     });
   }
+  // This inject only mounts while Editor is showing — always pin on paint.
+  scheduleTop();
   if (!doc.documentElement[FLAG]) {
     doc.documentElement[FLAG] = true;
-    doc.documentElement.__gatewaiEditorWasActive = editorTabActive();
     doc.addEventListener('click', function (e) {
-      const tab = e.target && e.target.closest && e.target.closest('[role="tab"]');
-      if (!tab) return;
-      const label = (tab.textContent || '').toLowerCase();
+      const t = e.target && e.target.closest && e.target.closest(
+        'label, button, [role="radio"], [data-baseweb="radio"]'
+      );
+      if (!t) return;
+      const label = (t.textContent || '').toLowerCase();
       if (label.indexOf('editor') === -1) return;
-      // Explicit Editor click — always jump to top (covers later opens without a rerun).
       scheduleTop();
-      doc.documentElement.__gatewaiEditorWasActive = true;
     }, true);
-    try {
-      const obs = new MutationObserver(function () {
-        const active = editorTabActive();
-        const was = !!doc.documentElement.__gatewaiEditorWasActive;
-        if (active && !was) scheduleTop();
-        doc.documentElement.__gatewaiEditorWasActive = active;
-      });
-      obs.observe(doc.body, {
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['aria-selected', 'class']
-      });
-    } catch (e) {}
+    // ACE grabbing focus used to scroll the page to the editor mid-page.
+    doc.addEventListener('focusin', function (e) {
+      const t = e.target;
+      if (!t) return;
+      if (!(t.closest && (t.closest('.ace_editor') || t.closest('.ace_text-input')))) return;
+      setTimeout(toTop, 0);
+      setTimeout(toTop, 80);
+    }, true);
   }
-  // First paint only if Editor is already the active tab.
-  if (editorTabActive()) scheduleTop();
 })();
 </script>
         """,
@@ -1277,8 +1259,10 @@ def render_memory_slot_sidebar(key_prefix, height=480, show_meta=True):
                 use_container_width=True,
             ):
                 st.session_state.selected_file = fname
-                # Keep Live Preview focused on the same file when it's open.
                 st.session_state["expanded_slot"] = fname
+                # Live Preview off → open the slot in Editor. Preview on → stay on GateWai.
+                if not st.session_state.get("show_preview"):
+                    st.session_state.main_view_selector = "📝 Editor"
                 st.rerun()
         with active_col:
             if fname in core_files:
@@ -2276,13 +2260,16 @@ def render_app_memory_sidebar():
 
 
 def render_live_preview_pane():
-    """GateWai Live Preview — artifacts + slot content (center pane, not the right rail).
+    """GateWai Live Preview — artifacts + the currently selected Memory slot.
 
-    Memory slots (file list / Active toggles) live in the grey right sidebar.
-    Live Preview keeps HTML artifacts, web context, and open-slot content reading.
+    File picking / Active toggles live in the right Memory sidebar; this pane
+    only renders the selected slot's contents (plus HTML artifacts / web ctx).
     """
     st.subheader("📋 Live Preview")
-    st.caption("Artifacts and slot contents. Use the right Memory sidebar to pick Active files.")
+    selected = st.session_state.get("selected_file") or CORE_SCHEMA.get(
+        "summary.txt", "MI_Master_Record"
+    )
+    st.caption(f"Showing **{selected}** — pick another file in the Memory sidebar.")
 
     # A. HTML ARTIFACTS
     if st.session_state.messages:
@@ -2300,7 +2287,7 @@ def render_live_preview_pane():
         with st.expander("View Scraped Data"):
             st.write(st.session_state.temp_web_ctx[:500] + "...")
 
-    # C. Dynamic Height Control
+    # C. Selected slot contents only (no file list)
     box_height = st.slider(
         "Content Box Height",
         min_value=100,
@@ -2310,70 +2297,16 @@ def render_live_preview_pane():
         help="Adjust the height of the content box.",
         key="live_preview_box_height",
     )
-
-    # D. Core Memory Slots — body is rendered only for the slot you open
-    st.caption("🧠 Core Memory (open one slot to preview it)")
-    for key, slot_name in CORE_SCHEMA.items():
-        if slot_name == "SI_Identity":
-            continue
-        expanded = (st.session_state.get("expanded_slot") == slot_name)
-        if expanded:
-            val = st.session_state.get(slot_name, "")
-            with st.expander(f"**{slot_name}**", expanded=True):
-                if st.button(
-                    f"Close {slot_name}",
-                    key=f"select_{slot_name}",
-                    type="secondary",
-                    use_container_width=True,
-                ):
-                    st.session_state["expanded_slot"] = None
-                    st.rerun()
-                with st.container(height=box_height, border=True):
-                    st.markdown(val if val else "*Empty*", unsafe_allow_html=True)
-        else:
-            chars = len(str(st.session_state.get(slot_name, "") or ""))
-            if st.button(
-                f"{slot_name}  ({chars:,})",
-                key=f"select_{slot_name}",
-                use_container_width=True,
-            ):
-                st.session_state["expanded_slot"] = slot_name
-                st.rerun()
-
-    # E. User Slots — same rule: no HTML until the slot is opened
-    if "loaded_slots_metadata" in st.session_state:
-        user_slots = [
-            k for k, v in st.session_state.loaded_slots_metadata.items()
-            if v.get("slot_type") == "user"
-        ]
-        if user_slots:
-            st.caption("📁 User Files (open one file to preview it)")
-            for slot_name in user_slots:
-                if slot_name == "SI_Identity":
-                    continue
-                expanded = (st.session_state.get("expanded_slot") == slot_name)
-                if expanded:
-                    val = st.session_state.get(slot_name, "")
-                    with st.expander(f"**{slot_name}**", expanded=True):
-                        if st.button(
-                            f"Close {slot_name}",
-                            key=f"select_user_{slot_name}",
-                            type="secondary",
-                            use_container_width=True,
-                        ):
-                            st.session_state["expanded_slot"] = None
-                            st.rerun()
-                        with st.container(height=box_height, border=True):
-                            st.markdown(val if val else "*Empty*", unsafe_allow_html=True)
-                else:
-                    chars = len(str(st.session_state.get(slot_name, "") or ""))
-                    if st.button(
-                        f"{slot_name}  ({chars:,})",
-                        key=f"select_user_{slot_name}",
-                        use_container_width=True,
-                    ):
-                        st.session_state["expanded_slot"] = slot_name
-                        st.rerun()
+    st.markdown(f"### {selected}")
+    meta = st.session_state.get("loaded_slots_metadata", {}).get(selected, {})
+    if selected in CORE_SCHEMA.values():
+        st.caption("System core")
+    elif meta:
+        scope = str(meta.get("scope", "project")).upper()
+        st.caption(f"User slot · {scope}")
+    val = st.session_state.get(selected, "")
+    with st.container(height=box_height, border=True):
+        st.markdown(val if val else "*Empty*", unsafe_allow_html=True)
 
 
 def engine_room_widget_key(canonical, project=None):
