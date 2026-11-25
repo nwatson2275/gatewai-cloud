@@ -556,13 +556,14 @@ st.markdown(
             margin-top: 15px; margin-bottom: 5px; font-weight: bold;
             color: #424242; border-bottom: 1px solid #e0e0e0;
         }
-        /* Right Memory sidebar — true app-level twin of [data-testid="stSidebar"]. */
+        /* Right Memory + Live Preview — app-level panes that push the whole shell left. */
         :root {
             --gatewai-rsb-width: 0px;
+            --gatewai-lp-width: 0px;
         }
-        /* Push the WHOLE app (left sidebar + main, incl. project manager) left. */
+        /* Push left sidebar + main (incl. project manager) by both panes combined. */
         [data-testid="stAppViewContainer"] {
-            margin-right: var(--gatewai-rsb-width) !important;
+            margin-right: calc(var(--gatewai-lp-width) + var(--gatewai-rsb-width)) !important;
             transition: margin-right 0.12s ease;
         }
         .gatewai-rsb-panel {
@@ -579,9 +580,25 @@ st.markdown(
             z-index: 1000100 !important;
             padding: 0.75rem 0.85rem 1.25rem 1rem !important;
             box-sizing: border-box !important;
-            /* Fixed removes it from flow — no hole left in the main column. */
         }
-        .gatewai-rsb-drag {
+        /* Live Preview sits left of Memory (or at the right edge when Memory is closed). */
+        .gatewai-lp-panel {
+            position: fixed !important;
+            top: 0 !important;
+            right: var(--gatewai-rsb-width) !important;
+            width: var(--gatewai-lp-width) !important;
+            height: 100vh !important;
+            max-height: 100vh !important;
+            background-color: #ffffff !important;
+            border-left: 1px solid rgba(49, 51, 63, 0.2) !important;
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+            z-index: 1000090 !important;
+            padding: 0.75rem 0.85rem 1.25rem 1rem !important;
+            box-sizing: border-box !important;
+        }
+        .gatewai-rsb-drag,
+        .gatewai-lp-drag {
             position: absolute !important;
             top: 0 !important;
             left: 0 !important;
@@ -592,7 +609,9 @@ st.markdown(
             background: transparent !important;
         }
         .gatewai-rsb-drag:hover,
-        .gatewai-rsb-drag.dragging {
+        .gatewai-rsb-drag.dragging,
+        .gatewai-lp-drag:hover,
+        .gatewai-lp-drag.dragging {
             background: rgba(49, 51, 63, 0.18) !important;
         }
         .gatewai-rsb-edge-tab {
@@ -626,12 +645,6 @@ st.markdown(
             opacity: 0 !important;
             overflow: hidden !important;
             pointer-events: none !important;
-        }
-        /* Live Preview center pane scroll (desktop). */
-        @media (min-width: 769px) {
-            [data-testid="column"]:nth-child(2) [data-testid="stVerticalBlock"] {
-                height: 85vh; overflow-y: auto; border-left: 1px solid #e0e0e0; padding-left: 20px;
-            }
         }
         div.stButton > button:first-child { width: 100%; border-radius: 5px; }
         .purge-btn { border: 1px solid #ff4b4b; color: #ff4b4b; }
@@ -2259,17 +2272,213 @@ def render_app_memory_sidebar():
         render_memory_slot_sidebar("memory", height=None, show_meta=True)
 
 
+_LP_WIDTH_COOKIE = "gatewai_lp_width"
+_LP_WIDTH_LS = "gatewai_lp_width"
+_LP_DEFAULT_WIDTH_PX = 400
+_LP_MIN_WIDTH_PX = 280
+_LP_MAX_WIDTH_PX = 720
+
+
+def _clamp_lp_width_px(raw):
+    try:
+        width = int(float(raw))
+    except (TypeError, ValueError):
+        return _LP_DEFAULT_WIDTH_PX
+    return max(_LP_MIN_WIDTH_PX, min(_LP_MAX_WIDTH_PX, width))
+
+
+def read_lp_width_cookie():
+    try:
+        cookies = getattr(st.context, "cookies", None)
+        if cookies is None or not hasattr(cookies, "get"):
+            return None
+        raw = cookies.get(_LP_WIDTH_COOKIE)
+        if raw is None or str(raw).strip() == "":
+            return None
+        return _clamp_lp_width_px(raw)
+    except Exception:
+        return None
+
+
+def live_preview_width_px():
+    cookie_w = read_lp_width_cookie()
+    if cookie_w is not None:
+        st.session_state.live_preview_width_pref = cookie_w
+    if "live_preview_width_pref" not in st.session_state:
+        st.session_state.live_preview_width_pref = _LP_DEFAULT_WIDTH_PX
+    width = _clamp_lp_width_px(st.session_state.live_preview_width_pref)
+    st.session_state.live_preview_width_pref = width
+    return width
+
+
+def install_live_preview_chrome(open_preview, width_px):
+    """Fix Live Preview to the top-right (left of Memory), push the whole app left."""
+    open_js = "true" if open_preview else "false"
+    width_px = int(_clamp_lp_width_px(width_px))
+    components.html(
+        f"""
+<script>
+(function () {{
+  const w = window.parent;
+  const doc = w.document;
+  const OPEN = {open_js};
+  const WIDTH = {width_px};
+  const MIN_W = {_LP_MIN_WIDTH_PX};
+  const MAX_W = {_LP_MAX_WIDTH_PX};
+  const LS_KEY = '{_LP_WIDTH_LS}';
+  const COOKIE = '{_LP_WIDTH_COOKIE}';
+  const FLAG = '__gatewaiLivePreviewChrome';
+
+  function setCookie(px) {{
+    try {{
+      const secure = w.location.protocol === 'https:' ? '; Secure' : '';
+      doc.cookie = COOKIE + '=' + encodeURIComponent(String(px))
+        + '; path=/; max-age=31536000; SameSite=Lax' + secure;
+    }} catch (e) {{}}
+    try {{ w.localStorage.setItem(LS_KEY, String(px)); }} catch (e) {{}}
+  }}
+
+  function rsbPx() {{
+    const raw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-rsb-width');
+    const n = parseInt(raw, 10);
+    return isNaN(n) ? 0 : n;
+  }}
+
+  function applyWidth(px) {{
+    px = Math.max(MIN_W, Math.min(MAX_W, Math.round(px)));
+    doc.documentElement.style.setProperty('--gatewai-lp-width', OPEN ? (px + 'px') : '0px');
+    return px;
+  }}
+
+  function findPanel() {{
+    const shell = doc.querySelector('.gatewai-lp-shell');
+    if (!shell) return null;
+    let el = shell.closest('[data-testid="stVerticalBlock"]');
+    if (!el) return shell.parentElement;
+    while (el && !el.querySelector('.gatewai-lp-shell')) {{
+      const parent = el.parentElement
+        && el.parentElement.closest('[data-testid="stVerticalBlock"]');
+      if (!parent || parent === el) break;
+      if (parent.querySelector('[data-testid="stRadio"]')) break;
+      el = parent;
+    }}
+    // Prefer the container that owns the shell and the preview body.
+    while (el) {{
+      const parent = el.parentElement
+        && el.parentElement.closest('[data-testid="stVerticalBlock"]');
+      if (!parent || parent === el) break;
+      if (parent.querySelector('[data-testid="stRadio"]')) break;
+      if (parent.querySelector('.gatewai-rsb-shell')) break;
+      if (!parent.querySelector('.gatewai-lp-shell')) break;
+      el = parent;
+    }}
+    return el;
+  }}
+
+  let _dragging = false;
+  function ensureDrag(panel) {{
+    let handle = panel.querySelector(':scope > .gatewai-lp-drag');
+    if (!handle) {{
+      handle = doc.createElement('div');
+      handle.className = 'gatewai-lp-drag';
+      handle.title = 'Drag to resize Live Preview';
+      panel.appendChild(handle);
+    }}
+    if (handle.dataset.bound === '1') return;
+    handle.dataset.bound = '1';
+    handle.addEventListener('mousedown', function (ev) {{
+      ev.preventDefault();
+      _dragging = true;
+      handle.classList.add('dragging');
+      doc.body.style.cursor = 'col-resize';
+      doc.body.style.userSelect = 'none';
+    }});
+    doc.addEventListener('mousemove', function (ev) {{
+      if (!_dragging) return;
+      const px = applyWidth(w.innerWidth - ev.clientX - rsbPx());
+      panel.style.width = px + 'px';
+    }});
+    doc.addEventListener('mouseup', function () {{
+      if (!_dragging) return;
+      _dragging = false;
+      handle.classList.remove('dragging');
+      doc.body.style.cursor = '';
+      doc.body.style.userSelect = '';
+      const raw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-lp-width');
+      const px = parseInt(raw, 10) || WIDTH;
+      setCookie(px);
+    }});
+  }}
+
+  function mount() {{
+    if (_dragging) return;
+    let startW = WIDTH;
+    try {{
+      const ls = parseInt(w.localStorage.getItem(LS_KEY) || '', 10);
+      if (ls) startW = Math.max(MIN_W, Math.min(MAX_W, ls));
+    }} catch (e) {{}}
+    applyWidth(startW);
+    const panel = findPanel();
+    if (OPEN && panel) {{
+      panel.classList.add('gatewai-lp-panel');
+      // Keep preview scrolled to its own top on mount.
+      try {{ panel.scrollTop = 0; }} catch (e) {{}}
+      ensureDrag(panel);
+    }} else if (panel) {{
+      panel.classList.remove('gatewai-lp-panel');
+    }} else if (!OPEN) {{
+      applyWidth(0);
+      doc.documentElement.style.setProperty('--gatewai-lp-width', '0px');
+    }}
+  }}
+
+  w.__gatewaiLpMount = mount;
+  function mountSoon() {{
+    if (w.__gatewaiLpTimer) clearTimeout(w.__gatewaiLpTimer);
+    w.__gatewaiLpTimer = setTimeout(function () {{
+      if (typeof w.__gatewaiLpMount === 'function') w.__gatewaiLpMount();
+    }}, 50);
+  }}
+  mount();
+  setTimeout(function () {{ if (w.__gatewaiLpMount) w.__gatewaiLpMount(); }}, 120);
+  setTimeout(function () {{ if (w.__gatewaiLpMount) w.__gatewaiLpMount(); }}, 500);
+  if (!w[FLAG]) {{
+    w[FLAG] = true;
+    try {{
+      const obs = new MutationObserver(mountSoon);
+      obs.observe(doc.body, {{ childList: true, subtree: true }});
+    }} catch (e) {{}}
+  }}
+}})();
+</script>
+        """,
+        height=0,
+    )
+
+
+def render_app_live_preview():
+    """App-level Live Preview panel (GateWai only; fixed from the top by chrome JS)."""
+    with st.container():
+        st.markdown('<div class="gatewai-lp-shell" aria-hidden="true"></div>', unsafe_allow_html=True)
+        render_live_preview_pane()
+
+
 def render_live_preview_pane():
     """GateWai Live Preview — artifacts + the currently selected Memory slot.
 
     File picking / Active toggles live in the right Memory sidebar; this pane
     only renders the selected slot's contents (plus HTML artifacts / web ctx).
+    Content-box height slider is last.
     """
     st.subheader("📋 Live Preview")
     selected = st.session_state.get("selected_file") or CORE_SCHEMA.get(
         "summary.txt", "MI_Master_Record"
     )
     st.caption(f"Showing **{selected}** — pick another file in the Memory sidebar.")
+
+    if "live_preview_box_height" not in st.session_state:
+        st.session_state.live_preview_box_height = 550
+    box_height = int(st.session_state.live_preview_box_height or 550)
 
     # A. HTML ARTIFACTS
     if st.session_state.messages:
@@ -2287,16 +2496,7 @@ def render_live_preview_pane():
         with st.expander("View Scraped Data"):
             st.write(st.session_state.temp_web_ctx[:500] + "...")
 
-    # C. Selected slot contents only (no file list)
-    box_height = st.slider(
-        "Content Box Height",
-        min_value=100,
-        max_value=800,
-        value=550,
-        step=50,
-        help="Adjust the height of the content box.",
-        key="live_preview_box_height",
-    )
+    # C. Selected slot contents
     st.markdown(f"### {selected}")
     meta = st.session_state.get("loaded_slots_metadata", {}).get(selected, {})
     if selected in CORE_SCHEMA.values():
@@ -2307,6 +2507,16 @@ def render_live_preview_pane():
     val = st.session_state.get(selected, "")
     with st.container(height=box_height, border=True):
         st.markdown(val if val else "*Empty*", unsafe_allow_html=True)
+
+    # D. Height control last
+    st.slider(
+        "Content Box Height",
+        min_value=100,
+        max_value=800,
+        step=50,
+        key="live_preview_box_height",
+        help="Adjust the height of the content box.",
+    )
 
 
 def engine_room_widget_key(canonical, project=None):
@@ -5036,7 +5246,7 @@ with st.sidebar:
         st.session_state.show_preview = st.toggle(
             "👁️ Show Live Preview",
             value=st.session_state.show_preview,
-            help="Shows artifacts and slot contents beside chat. The grey Memory sidebar (>>) stays on the right for Active file toggles.",
+            help="Opens a top-to-bottom preview pane on GateWai that pushes the whole app left (hidden on Editor). Memory sidebar (>>) stays on the far right.",
         )
 
         # 2. TELEMETRY
@@ -7014,75 +7224,71 @@ if main_view == _MAIN_GATEWAI:
         st.session_state.get("prompt_submit_in_flight")
     ) or bool(_pending_now_prompt) or bool(st.session_state.get("pending_updates"))
     _mobile = _mobile_shell
-    _want_preview = bool(st.session_state.show_preview) and not _turn_busy and not _mobile
-    # Memory is the app-level right sidebar. Live Preview is only a center split.
-    col_preview = None
-    if _want_preview:
-        col_chat, col_preview = st.columns(2)
-    else:
-        col_chat = st.container()
+    # Desktop Live Preview = app-level top-to-bottom panel (pushes whole app left).
+    # Hidden on Editor; skipped while a turn is busy / on mobile (expander instead).
+    _use_app_lp = bool(st.session_state.show_preview) and not _turn_busy and not _mobile
+    if _use_app_lp:
+        render_app_live_preview()
+    install_live_preview_chrome(_use_app_lp, live_preview_width_px())
 
-    with col_chat:
-        # Last chance: strip abandoned user bubbles before chat paints (no banner).
-        if (
-            not st.session_state.get("_chat_submit_this_run")
-            and not st.session_state.get("_run_model_after_remount")
-            and not st.session_state.get("prompt_submit_in_flight")
-            and reconcile_stale_chat_turn()
-        ):
-            st.rerun()
+    # Last chance: strip abandoned user bubbles before chat paints (no banner).
+    if (
+        not st.session_state.get("_chat_submit_this_run")
+        and not st.session_state.get("_run_model_after_remount")
+        and not st.session_state.get("prompt_submit_in_flight")
+        and reconcile_stale_chat_turn()
+    ):
+        st.rerun()
 
-        chat_container = render_project_chat(chat_pane_height(), "chat_earlier_main")
+    chat_container = render_project_chat(chat_pane_height(), "chat_earlier_main")
 
-        _send_err = st.session_state.pop("chat_send_error", None)
-        if _send_err:
-            st.error(f"Last send failed: {_send_err}")
-        # No "Sending…" strip — it was getting stuck across reruns. The Thinking
-        # spinner during the API call is enough feedback.
+    _send_err = st.session_state.pop("chat_send_error", None)
+    if _send_err:
+        st.error(f"Last send failed: {_send_err}")
+    # No "Sending…" strip — it was getting stuck across reruns. The Thinking
+    # spinner during the API call is enough feedback.
 
-        # Staging lives here (same tab as chat) — not above the tabs.
-        render_staging_area()
+    # Staging lives here (same tab as chat) — not above the tabs.
+    render_staging_area()
 
-        # Mobile: Memory + Preview under chat (fixed right sidebar is desktop-only).
-        if _show_slots and _mobile:
-            with st.expander("📂 Memory slots", expanded=True):
-                render_memory_slot_sidebar("memory", height=280, show_meta=False)
-        if bool(st.session_state.show_preview) and col_preview is None and not _turn_busy:
-            with st.expander("📋 Live Preview", expanded=False):
-                render_live_preview_pane()
-
-        # Collapsed by default — an open debugger after submit was blowing mobile layout
-        # and stealing scroll away from the chat pane.
-        _dbg_logs = None
-        if st.session_state.get("shadow_logs_manual_run"):
-            _dbg_logs = st.session_state.shadow_logs_manual_run
-        elif st.session_state.get("shadow_logs"):
-            _dbg_logs = st.session_state.shadow_logs
-        _dbg_has = bool(_dbg_logs) and not (
-            isinstance(_dbg_logs, list)
-            and len(_dbg_logs) == 1
-            and "Waiting" in str(_dbg_logs[0])
-        )
-        _dbg_label = "🕵️ Shadow Debugger"
-        if _dbg_has:
-            _dbg_label += " · updated"
-        with st.expander(_dbg_label, expanded=False):
-            with st.container(height=160):
-                if isinstance(_dbg_logs, list) and _dbg_logs:
-                    st.code("\n".join(str(x) for x in _dbg_logs), wrap_lines=True)
-                elif _dbg_logs:
-                    st.code(str(_dbg_logs), wrap_lines=True)
-                else:
-                    st.code("Waiting for input...", wrap_lines=True)
-
-    if col_preview is not None:
-        with col_preview:
+    # Mobile: Memory + Preview under chat (fixed panes are desktop-only).
+    if _show_slots and _mobile:
+        with st.expander("📂 Memory slots", expanded=True):
+            render_memory_slot_sidebar("memory", height=280, show_meta=False)
+    if bool(st.session_state.show_preview) and _mobile and not _turn_busy:
+        with st.expander("📋 Live Preview", expanded=False):
             render_live_preview_pane()
+
+    # Collapsed by default — an open debugger after submit was blowing mobile layout
+    # and stealing scroll away from the chat pane.
+    _dbg_logs = None
+    if st.session_state.get("shadow_logs_manual_run"):
+        _dbg_logs = st.session_state.shadow_logs_manual_run
+    elif st.session_state.get("shadow_logs"):
+        _dbg_logs = st.session_state.shadow_logs
+    _dbg_has = bool(_dbg_logs) and not (
+        isinstance(_dbg_logs, list)
+        and len(_dbg_logs) == 1
+        and "Waiting" in str(_dbg_logs[0])
+    )
+    _dbg_label = "🕵️ Shadow Debugger"
+    if _dbg_has:
+        _dbg_label += " · updated"
+    with st.expander(_dbg_label, expanded=False):
+        with st.container(height=160):
+            if isinstance(_dbg_logs, list) and _dbg_logs:
+                st.code("\n".join(str(x) for x in _dbg_logs), wrap_lines=True)
+            elif _dbg_logs:
+                st.code(str(_dbg_logs), wrap_lines=True)
+            else:
+                st.code("Waiting for input...", wrap_lines=True)
 
 # =========================================================
 # VIEW 2: EDITOR (The Integrated IDE)
 # =========================================================
 else:
+    # Live Preview is GateWai-only — clear its push width on Editor.
+    install_live_preview_chrome(False, 0)
     pin_editor_tab_to_top()
     # Memory sidebar is app-level (right); Editor uses the full remaining main pane.
     if "selected_file" not in st.session_state:
