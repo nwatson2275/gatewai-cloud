@@ -564,13 +564,9 @@ st.markdown(
             --gatewai-right-chrome: calc(var(--gatewai-lp-width) + var(--gatewai-rsb-width));
         }
         /*
-          Streamlit main/bottom are often position:absolute/fixed with right:0.
-          Inset with right only — do NOT also force max-width:100vw-chrome on the
-          bottom bar (that + width:100% + overflow:hidden was eating the prompt box).
+          Keep Streamlit's chat input (stBottom) completely stock.
+          Only shrink the main view container so messages clear the right chrome.
         */
-        .stApp {
-            box-sizing: border-box !important;
-        }
         [data-testid="stAppViewContainer"] {
             width: calc(100% - var(--gatewai-right-chrome)) !important;
             max-width: calc(100% - var(--gatewai-right-chrome)) !important;
@@ -580,35 +576,14 @@ st.markdown(
         section.main,
         [data-testid="stMain"] {
             right: var(--gatewai-right-chrome) !important;
-            width: auto !important;
-            max-width: none !important;
-            box-sizing: border-box !important;
-            overflow-x: hidden !important;
-        }
-        /* Prompt / bottom bar: only pin the right edge; keep Streamlit's left/width. */
-        [data-testid="stBottom"],
-        [data-testid="stBottomBlockContainer"] {
-            right: var(--gatewai-right-chrome) !important;
-            width: auto !important;
-            max-width: none !important;
-            overflow: visible !important;
-        }
-        [data-testid="stChatInput"] {
-            max-width: 100% !important;
             box-sizing: border-box !important;
         }
-        /* Chat bubbles / long lines must wrap inside the shortened main column. */
+        /* Chat bubbles wrap inside the shortened main column. */
         section.main [data-testid="stChatMessage"],
         section.main [data-testid="stChatMessage"] * {
             overflow-wrap: anywhere;
             word-break: break-word;
             max-width: 100%;
-        }
-        section.main .block-container {
-            max-width: 100% !important;
-            width: 100% !important;
-            padding-right: 0.75rem !important;
-            box-sizing: border-box !important;
         }
         .gatewai-rsb-panel {
             position: fixed !important;
@@ -2432,27 +2407,30 @@ def install_right_sidebar_chrome(open_slots, width_px):
     return (open ? widthPx : 0) + (isNaN(lp) ? 0 : lp);
   }}
 
+  function clearPromptBoxInlineStyles() {{
+    // Undo earlier experiments that squashed st.chat_input into a tiny square.
+    Array.from(doc.querySelectorAll(
+      '[data-testid="stBottom"], [data-testid="stBottomBlockContainer"], [data-testid="stChatInput"]'
+    )).forEach(function (el) {{
+      ['right', 'left', 'width', 'max-width', 'min-width', 'overflow', 'margin', 'padding'].forEach(function (p) {{
+        el.style.removeProperty(p);
+      }});
+    }});
+  }}
+
   function insetMainFromRightChrome() {{
-    // Reinforce CSS against Streamlit emotion absolute right:0 layouts.
-    // Bottom/chat input: set right only — never max-width/width (hides the prompt box).
+    // Only the main shell — never touch the stock Streamlit prompt bar.
     const total = rightChromePx();
     doc.documentElement.style.setProperty('--gatewai-right-chrome', total + 'px');
+    clearPromptBoxInlineStyles();
     Array.from(doc.querySelectorAll('[data-testid="stAppViewContainer"]')).forEach(function (el) {{
       el.style.setProperty('width', 'calc(100% - ' + total + 'px)', 'important');
       el.style.setProperty('max-width', 'calc(100% - ' + total + 'px)', 'important');
     }});
     Array.from(doc.querySelectorAll('section.main, [data-testid="stMain"]')).forEach(function (el) {{
       el.style.setProperty('right', total + 'px', 'important');
-      el.style.setProperty('width', 'auto', 'important');
+      el.style.removeProperty('width');
       el.style.removeProperty('max-width');
-    }});
-    Array.from(doc.querySelectorAll(
-      '[data-testid="stBottom"], [data-testid="stBottomBlockContainer"]'
-    )).forEach(function (el) {{
-      el.style.setProperty('right', total + 'px', 'important');
-      el.style.setProperty('width', 'auto', 'important');
-      el.style.setProperty('max-width', 'none', 'important');
-      el.style.setProperty('overflow', 'visible', 'important');
     }});
   }}
 
@@ -2650,6 +2628,16 @@ def install_live_preview_chrome(open_preview, width_px):
     return px;
   }}
 
+  function clearPromptBoxInlineStyles() {{
+    Array.from(doc.querySelectorAll(
+      '[data-testid="stBottom"], [data-testid="stBottomBlockContainer"], [data-testid="stChatInput"]'
+    )).forEach(function (el) {{
+      ['right', 'left', 'width', 'max-width', 'min-width', 'overflow', 'margin', 'padding'].forEach(function (p) {{
+        el.style.removeProperty(p);
+      }});
+    }});
+  }}
+
   function insetMainFromRightChrome() {{
     const rsbRaw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-rsb-width');
     const lpRaw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-lp-width');
@@ -2657,22 +2645,15 @@ def install_live_preview_chrome(open_preview, width_px):
     const lp = parseInt(lpRaw, 10);
     const total = (isNaN(rsb) ? 0 : rsb) + (isNaN(lp) ? 0 : lp);
     doc.documentElement.style.setProperty('--gatewai-right-chrome', total + 'px');
+    clearPromptBoxInlineStyles();
     Array.from(doc.querySelectorAll('[data-testid="stAppViewContainer"]')).forEach(function (el) {{
       el.style.setProperty('width', 'calc(100% - ' + total + 'px)', 'important');
       el.style.setProperty('max-width', 'calc(100% - ' + total + 'px)', 'important');
     }});
     Array.from(doc.querySelectorAll('section.main, [data-testid="stMain"]')).forEach(function (el) {{
       el.style.setProperty('right', total + 'px', 'important');
-      el.style.setProperty('width', 'auto', 'important');
+      el.style.removeProperty('width');
       el.style.removeProperty('max-width');
-    }});
-    Array.from(doc.querySelectorAll(
-      '[data-testid="stBottom"], [data-testid="stBottomBlockContainer"]'
-    )).forEach(function (el) {{
-      el.style.setProperty('right', total + 'px', 'important');
-      el.style.setProperty('width', 'auto', 'important');
-      el.style.setProperty('max-width', 'none', 'important');
-      el.style.setProperty('overflow', 'visible', 'important');
     }});
   }}
 
