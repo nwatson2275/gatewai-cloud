@@ -1154,6 +1154,175 @@ def pin_editor_tab_to_top():
         width=0,
     )
 
+def list_project_slot_names():
+    """Core slots first, then user slots (non-core) sorted by name."""
+    all_files = list(CORE_SCHEMA.values())
+    if "loaded_slots_metadata" in st.session_state:
+        core_names = set(CORE_SCHEMA.values())
+        all_files.extend(
+            sorted([
+                k for k, v in st.session_state.loaded_slots_metadata.items()
+                if v.get("slot_type") == "user" and k not in core_names
+            ])
+        )
+    return all_files
+
+
+def render_memory_slot_sidebar(key_prefix, height=480, show_meta=True):
+    """Collapsible memory-slot browser: names + Active-in-chat toggles.
+
+    Shared by Editor and GateWai so users can include/exclude slots without
+    leaving the chat view. key_prefix keeps widget keys unique per surface.
+    """
+    all_files = list_project_slot_names()
+    if "selected_file" not in st.session_state:
+        st.session_state.selected_file = CORE_SCHEMA.get("summary.txt", "MI_Master_Record")
+    if all_files and st.session_state.selected_file not in all_files:
+        st.session_state.selected_file = all_files[0]
+
+    hdr_file, hdr_active = st.columns([3, 1])
+    with hdr_file:
+        st.caption("File")
+    with hdr_active:
+        st.caption("Active")
+
+    core_files = set(CORE_SCHEMA.values())
+    list_box = st.container(height=height) if len(all_files) > 8 else st.container()
+
+    def render_slot_row(fname):
+        name_col, active_col = st.columns([3, 1])
+        is_selected = (fname == st.session_state.selected_file)
+        with name_col:
+            if st.button(
+                fname,
+                key=f"{key_prefix}_select_{fname}",
+                type="primary" if is_selected else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.selected_file = fname
+                st.rerun()
+        with active_col:
+            if fname in core_files:
+                st.button(
+                    "🟢",
+                    key=f"{key_prefix}_core_active_{fname}",
+                    disabled=True,
+                    use_container_width=True,
+                    help="System core — always active in chat",
+                )
+            else:
+                row_meta = st.session_state.get("loaded_slots_metadata", {}).get(fname, {})
+                is_active = row_meta.get("active_in_context", True)
+                if st.button(
+                    "🟢" if is_active else "⚪",
+                    key=f"{key_prefix}_active_{fname}",
+                    type="secondary",
+                    use_container_width=True,
+                    help=(
+                        "Active in Chat — click to hide from the AI"
+                        if is_active
+                        else "Hidden from Chat — click to include in the AI context"
+                    ),
+                ):
+                    meta_map = st.session_state.setdefault("loaded_slots_metadata", {})
+                    if fname not in meta_map:
+                        meta_map[fname] = {}
+                    meta_map[fname]["active_in_context"] = not is_active
+                    # Persist Active toggles so they survive refresh.
+                    try:
+                        save_state_dict = {k: st.session_state.get(k, "") for k in CORE_SCHEMA.values()}
+                        save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
+                        save_state_dict["messages"] = st.session_state.get("messages") or []
+                        for user_key in st.session_state.loaded_slots_metadata.keys():
+                            if user_key not in CORE_SCHEMA.values():
+                                save_state_dict[user_key] = st.session_state.get(user_key, "")
+                        save_project_state(save_state_dict, st.session_state.active_project, silent=True)
+                    except Exception as e:
+                        print(f"ERROR: persist active_in_context failed: {e}")
+                    st.rerun()
+
+    def count_active_in_chat(fnames):
+        meta_map = st.session_state.get("loaded_slots_metadata", {})
+        active_n = 0
+        for f in fnames:
+            if f in core_files:
+                active_n += 1
+            elif meta_map.get(f, {}).get("active_in_context", True):
+                active_n += 1
+        return active_n
+
+    def folder_expander_label(icon, title, fnames):
+        total = len(fnames)
+        active_n = count_active_in_chat(fnames)
+        return f"{icon} {title} ({active_n}/{total} active)"
+
+    with list_box:
+        core_list = list(CORE_SCHEMA.values())
+        with st.expander(
+            folder_expander_label("🔒", "System Core", core_list),
+            expanded=False,
+            key=f"{key_prefix}_folder__system_core",
+        ):
+            for fname in core_list:
+                render_slot_row(fname)
+
+        user_groups = {}
+        for fname in all_files:
+            if fname in core_files:
+                continue
+            folder = normalize_folder_name(
+                st.session_state.get("loaded_slots_metadata", {}).get(fname, {}).get("folder", "")
+            )
+            user_groups.setdefault(folder, []).append(fname)
+
+        named_folders = sorted([f for f in user_groups if f], key=str.lower)
+        for folder in named_folders:
+            files_in_folder = user_groups[folder]
+            with st.expander(
+                folder_expander_label("📁", folder, files_in_folder),
+                expanded=False,
+                key=f"{key_prefix}_folder__{folder}",
+            ):
+                for fname in files_in_folder:
+                    render_slot_row(fname)
+
+        ungrouped = user_groups.get("", [])
+        if ungrouped:
+            with st.expander(
+                folder_expander_label("📄", "Ungrouped", ungrouped),
+                expanded=False,
+                key=f"{key_prefix}_folder__ungrouped",
+            ):
+                for fname in ungrouped:
+                    render_slot_row(fname)
+
+    if not show_meta:
+        return
+
+    selected_file = st.session_state.selected_file
+    st.markdown("---")
+    meta = st.session_state.get("loaded_slots_metadata", {}).get(selected_file, {})
+    if meta.get("is_distributed", False):
+        st.success("🌐 **DISTRIBUTED TRUTH**\nThis is a summary record.")
+    elif meta.get("part_of_dtn", False):
+        st.info("🔗 **Part of DTN**\nLinked to a summary record.")
+
+    if selected_file in CORE_SCHEMA.values():
+        st.info("🔒 **SYSTEM CORE**\nAlways Active")
+    else:
+        scope = meta.get("scope", "project").upper()
+        desc = meta.get("description", "User Draft")
+        is_active = meta.get("active_in_context", True)
+        folder = normalize_folder_name(meta.get("folder", ""))
+        folder_line = f"\nFolder: {folder}" if folder else "\nFolder: Ungrouped"
+        if is_active:
+            st.success(f"🔓 **USER ({scope})**\n{desc}{folder_line}")
+        else:
+            st.caption(f"🙈 **HIDDEN ({scope})**\nFile is safe, but AI ignores it.{folder_line}")
+        if meta.get("ai_managed", False):
+            st.caption("AI-managed draft")
+
+
 def render_staging_area():
     """Review pending Shadow/Harvest proposals inside the GateWai tab (not above it).
 
@@ -6410,13 +6579,30 @@ if main_view == _MAIN_GATEWAI:
     _turn_busy = bool(st.session_state.get("held_chat_prompt")) or bool(
         st.session_state.get("prompt_submit_in_flight")
     ) or bool(_pending_now_prompt) or bool(st.session_state.get("pending_updates"))
+    _mobile = is_mobile_client()
+    if "gatewai_show_slots" not in st.session_state:
+        st.session_state.gatewai_show_slots = False
+    st.checkbox(
+        "📂 Memory slots",
+        key="gatewai_show_slots",
+        help="Show the memory-slot list beside chat so you can include/exclude files without leaving GateWai.",
+    )
+    _show_slots = bool(st.session_state.gatewai_show_slots)
+    # Desktop right sidebar; on mobile / busy turns use an expander under chat instead.
+    _use_slots_split = _show_slots and not _mobile and not _turn_busy
     # Never split chat/preview on phones — two columns + staging unglues the page.
+    # Prefer memory-slot sidebar over preview when both would compete.
     _use_preview_split = (
         bool(st.session_state.show_preview)
         and not _turn_busy
-        and not is_mobile_client()
+        and not _mobile
+        and not _use_slots_split
     )
-    if _use_preview_split:
+    col_slots = None
+    if _use_slots_split:
+        col_chat, col_slots = st.columns([3, 1])
+        col_preview = None
+    elif _use_preview_split:
         col_chat, col_preview = st.columns(2)
     else:
         col_chat = st.container()
@@ -6443,6 +6629,11 @@ if main_view == _MAIN_GATEWAI:
         # Staging lives here (same tab as chat) — not above the tabs.
         render_staging_area()
 
+        # Mobile / busy: slot list under chat (not a second column that unglues layout).
+        if _show_slots and col_slots is None:
+            with st.expander("📂 Memory slots", expanded=True):
+                render_memory_slot_sidebar("gatewai", height=280, show_meta=False)
+
         # Collapsed by default — an open debugger after submit was blowing mobile layout
         # and stealing scroll away from the chat pane.
         _dbg_logs = None
@@ -6466,6 +6657,12 @@ if main_view == _MAIN_GATEWAI:
                     st.code(str(_dbg_logs), wrap_lines=True)
                 else:
                     st.code("Waiting for input...", wrap_lines=True)
+
+    if col_slots is not None:
+        with col_slots:
+            st.markdown("### 📂 Memory")
+            st.caption("Tap 🟢/⚪ to include or hide a slot in chat context.")
+            render_memory_slot_sidebar("gatewai", height=520, show_meta=True)
 
 
 #    print("after with col_chat") # <-- ADD THIS LINE
@@ -6552,168 +6749,20 @@ else:
     )
 
     if show_file_list:
-        col_file_list, col_editor = st.columns([2, 3]) # Wider file list for folders + Active toggles
+        col_file_list, col_editor = st.columns([2, 3])
     else:
-        col_file_list = st.empty()  # Use st.empty() to create a placeholder when hidden
-        col_editor = st.container()  # Editor takes the full width
-    # 1. PREPARE FILE LIST (Merge Core + User)
-    all_files = list(CORE_SCHEMA.values()) # Start with System Files
+        col_file_list = None
+        col_editor = st.container()
 
-    # --- ENSURE selected_file IS ALWAYS DEFINED ---
     if "selected_file" not in st.session_state:
-        st.session_state.selected_file = CORE_SCHEMA.get("summary.txt", "")  # Default to Master Record
+        st.session_state.selected_file = CORE_SCHEMA.get("summary.txt", "")
     if show_file_list:
-
-
-        if "loaded_slots_metadata" in st.session_state:
-            # Add User files sorted by name (never re-list core/system slots)
-            core_names = set(CORE_SCHEMA.values())
-            u_files = sorted([
-                k for k, v in st.session_state.loaded_slots_metadata.items()
-                if v.get('slot_type') == 'user' and k not in core_names
-            ])
-            all_files.extend(u_files)
-
-        ## 2. MASTER-DETAIL LAYOUT
-        #col_file_list, col_editor = st.columns([1,4])
-
         with col_file_list:
             st.markdown("### 📂 Files")
-            if all_files and st.session_state.selected_file not in all_files:
-                st.session_state.selected_file = all_files[0]
-
-            hdr_file, hdr_active = st.columns([3, 1])
-            with hdr_file:
-                st.caption("File")
-            with hdr_active:
-                st.caption("Active")
-
-            core_files = set(CORE_SCHEMA.values())
-            list_box = st.container(height=480) if len(all_files) > 8 else st.container()
-
-            def render_editor_file_row(fname):
-                name_col, active_col = st.columns([3, 1])
-                is_selected = (fname == st.session_state.selected_file)
-                with name_col:
-                    if st.button(
-                        fname,
-                        key=f"editor_select_{fname}",
-                        type="primary" if is_selected else "secondary",
-                        use_container_width=True,
-                    ):
-                        st.session_state.selected_file = fname
-                        st.rerun()
-                with active_col:
-                    if fname in core_files:
-                        st.button(
-                            "🟢",
-                            key=f"editor_core_active_{fname}",
-                            disabled=True,
-                            use_container_width=True,
-                            help="System core — always active in chat",
-                        )
-                    else:
-                        row_meta = st.session_state.get("loaded_slots_metadata", {}).get(fname, {})
-                        is_active = row_meta.get("active_in_context", True)
-                        if st.button(
-                            "🟢" if is_active else "⚪",
-                            key=f"editor_active_{fname}",
-                            type="secondary",
-                            use_container_width=True,
-                            help="Active in Chat — click to hide from the AI" if is_active else "Hidden from Chat — click to include in the AI context",
-                        ):
-                            meta_map = st.session_state.setdefault("loaded_slots_metadata", {})
-                            if fname not in meta_map:
-                                meta_map[fname] = {}
-                            meta_map[fname]["active_in_context"] = not is_active
-                            st.rerun()
-
-            def count_active_in_chat(fnames):
-                meta_map = st.session_state.get("loaded_slots_metadata", {})
-                active_n = 0
-                for f in fnames:
-                    if f in core_files:
-                        active_n += 1
-                    elif meta_map.get(f, {}).get("active_in_context", True):
-                        active_n += 1
-                return active_n
-
-            def folder_expander_label(icon, title, fnames):
-                total = len(fnames)
-                active_n = count_active_in_chat(fnames)
-                return f"{icon} {title} ({active_n}/{total} active)"
-
-            with list_box:
-                core_list = list(CORE_SCHEMA.values())
-                # Stable keys so changing "3/12 active" in the label does not remount/collapse the folder
-                with st.expander(
-                    folder_expander_label("🔒", "System Core", core_list),
-                    expanded=False,
-                    key="editor_folder__system_core",
-                ):
-                    for fname in core_list:
-                        render_editor_file_row(fname)
-
-                user_groups = {}
-                for fname in all_files:
-                    if fname in core_files:
-                        continue
-                    folder = normalize_folder_name(
-                        st.session_state.get("loaded_slots_metadata", {}).get(fname, {}).get("folder", "")
-                    )
-                    user_groups.setdefault(folder, []).append(fname)
-
-                named_folders = sorted([f for f in user_groups if f], key=str.lower)
-                for folder in named_folders:
-                    files_in_folder = user_groups[folder]
-                    with st.expander(
-                        folder_expander_label("📁", folder, files_in_folder),
-                        expanded=False,
-                        key=f"editor_folder__{folder}",
-                    ):
-                        for fname in files_in_folder:
-                            render_editor_file_row(fname)
-
-                ungrouped = user_groups.get("", [])
-                if ungrouped:
-                    with st.expander(
-                        folder_expander_label("📄", "Ungrouped", ungrouped),
-                        expanded=False,
-                        key="editor_folder__ungrouped",
-                    ):
-                        for fname in ungrouped:
-                            render_editor_file_row(fname)
-
+            render_memory_slot_sidebar("editor", height=480, show_meta=True)
             selected_file = st.session_state.selected_file
-
-            st.markdown("---")
-            # Metadata Card (DTN-Aware)
-            meta = st.session_state.get("loaded_slots_metadata", {}).get(selected_file, {})
-
-            # DTN Status Indicators
-            if meta.get('is_distributed', False):
-                st.success("🌐 **DISTRIBUTED TRUTH**\nThis is a summary record.")
-            elif meta.get('part_of_dtn', False):
-                st.info("🔗 **Part of DTN**\nLinked to a summary record.")
-
-            if selected_file in CORE_SCHEMA.values():
-                st.info("🔒 **SYSTEM CORE**\nAlways Active")
-            else:
-                scope = meta.get('scope', 'project').upper()
-                desc = meta.get('description', 'User Draft')
-                is_active = meta.get('active_in_context', True)
-                folder = normalize_folder_name(meta.get("folder", ""))
-                folder_line = f"\nFolder: {folder}" if folder else "\nFolder: Ungrouped"
-
-                if is_active:
-                    st.success(f"🔓 **USER ({scope})**\n{desc}{folder_line}")
-                else:
-                    st.caption(f"🙈 **HIDDEN ({scope})**\nFile is safe, but AI ignores it.{folder_line}")
-                ai_managed = st.session_state.loaded_slots_metadata.get(selected_file, {}).get('ai_managed', False)
-                if ai_managed:
-                    st.caption("AI-managed draft")
     else:
-        selected_file = st.session_state.get("selected_file", CORE_SCHEMA.get("summary.txt", "")) # Load the last selected file if the panel is hidden
+        selected_file = st.session_state.get("selected_file", CORE_SCHEMA.get("summary.txt", ""))
 
     with col_editor:
         st.subheader(f"✏️ {st.session_state.active_project}  ·  {selected_file}")
