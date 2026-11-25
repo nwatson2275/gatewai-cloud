@@ -1110,12 +1110,18 @@ def chat_pane_height(desktop=720, mobile=520):
 def chat_history_container(height):
     """Fixed-height chat pane pinned to the latest message."""
     kwargs = {"height": height}
+    # Right-sidebar expand/collapse remounts chat; don't yank to the latest message.
+    preserve = bool(st.session_state.pop("_preserve_gatewai_chat_scroll", False))
     try:
         import inspect
         if "autoscroll" in inspect.signature(st.container).parameters:
-            kwargs["autoscroll"] = True
+            if preserve:
+                st.session_state._restore_gatewai_chat_scroll = True
+            else:
+                kwargs["autoscroll"] = True
     except Exception:
-        pass
+        if preserve:
+            st.session_state._restore_gatewai_chat_scroll = True
     return st.container(**kwargs)
 
 
@@ -2099,7 +2105,67 @@ def set_memory_slots_open(open_slots):
     open_slots = bool(open_slots)
     st.session_state.show_memory_slots = open_slots
     st.session_state.show_memory_slots_pref = open_slots
+    # Left sidebar toggle is client-side and keeps chat scroll; our remount would
+    # otherwise autoscroll GateWai to the latest message — preserve instead.
+    st.session_state._preserve_gatewai_chat_scroll = True
     persist_ui_layout_prefs()
+
+
+def restore_gatewai_chat_scroll_if_needed():
+    """After a right-sidebar remount, put the chat pane back where the user left it."""
+    if not st.session_state.pop("_restore_gatewai_chat_scroll", False):
+        return
+    components.html(
+        """
+<script>
+(function () {
+  const w = window.parent;
+  const doc = w.document;
+  const KEY = 'gatewai_chat_scroll_top';
+  let raw = null;
+  try { raw = w.sessionStorage.getItem(KEY); } catch (e) {}
+  if (raw === null || raw === '') return;
+  const y = parseInt(raw, 10);
+  if (isNaN(y)) return;
+
+  function findChatPane() {
+    const root = doc.querySelector('section.main') || doc;
+    const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
+    if (!msgs.length) return null;
+    const last = msgs[msgs.length - 1];
+    let el = last.parentElement;
+    while (el && el !== doc.body) {
+      if (el === doc.documentElement || el === doc.body) break;
+      if (el.matches && (
+        el.matches('section.main') ||
+        el.matches('[data-testid="stAppViewContainer"]') ||
+        el.matches('[data-testid="stAppScrollToBottomContainer"]') ||
+        el.matches('[data-testid="stMain"]')
+      )) {
+        el = el.parentElement;
+        continue;
+      }
+      if (el.scrollHeight > el.clientHeight + 8 && el.clientHeight > 40) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function restore() {
+    const pane = findChatPane();
+    if (!pane) return;
+    try { pane.style.scrollBehavior = 'auto'; } catch (e) {}
+    pane.scrollTop = y;
+  }
+  restore();
+  requestAnimationFrame(restore);
+  [40, 120, 280, 600, 1200].forEach(function (ms) { setTimeout(restore, ms); });
+})();
+</script>
+        """,
+        height=0,
+        width=0,
+    )
 
 
 def memory_slots_width_px():
@@ -2204,12 +2270,42 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }});
   }}
 
+  function findChatPane() {{
+    const root = doc.querySelector('section.main') || doc;
+    const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
+    if (!msgs.length) return null;
+    const last = msgs[msgs.length - 1];
+    let el = last.parentElement;
+    while (el && el !== doc.body) {{
+      if (el === doc.documentElement || el === doc.body) break;
+      if (el.matches && (
+        el.matches('section.main') ||
+        el.matches('[data-testid="stAppViewContainer"]') ||
+        el.matches('[data-testid="stAppScrollToBottomContainer"]') ||
+        el.matches('[data-testid="stMain"]')
+      )) {{
+        el = el.parentElement;
+        continue;
+      }}
+      if (el.scrollHeight > el.clientHeight + 8 && el.clientHeight > 40) return el;
+      el = el.parentElement;
+    }}
+    return null;
+  }}
+
+  function saveChatScroll() {{
+    const pane = findChatPane();
+    if (!pane) return;
+    try {{ w.sessionStorage.setItem('gatewai_chat_scroll_top', String(pane.scrollTop)); }} catch (e) {{}}
+  }}
+
   function clickStreamlitTarget(kind) {{
+    // Capture chat scroll before the Streamlit remount (left sidebar doesn't remount chat).
+    saveChatScroll();
     const want = kind === 'collapse' ? '<<' : '>>';
     const btn = Array.from(doc.querySelectorAll('button'))
       .find(b => isDecoyChevron(b) && (b.innerText || '').trim() === want);
     if (btn) {{
-      // Temporarily allow the click even if display:none.
       btn.style.display = '';
       btn.click();
     }}
@@ -7356,6 +7452,7 @@ if main_view == _MAIN_GATEWAI:
         st.rerun()
 
     chat_container = render_project_chat(chat_pane_height(), "chat_earlier_main")
+    restore_gatewai_chat_scroll_if_needed()
 
     _send_err = st.session_state.pop("chat_send_error", None)
     if _send_err:
