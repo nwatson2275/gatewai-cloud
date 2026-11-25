@@ -1207,24 +1207,28 @@ def render_staging_area():
                 if not isinstance(current_val, str):
                     current_val = str(current_val)
 
-                # Stack on mobile (side-by-side + 85vh CSS was destroying the layout).
-                if narrow:
-                    st.caption("❌ **CURRENT**")
-                    with st.container(height=160):
-                        st.code(current_val, language=get_code_language(str(current_val)), wrap_lines=True)
-                    st.caption("✅ **PROPOSED**")
-                    with st.container(height=160):
-                        st.code(new_content_str, language=get_code_language(new_content_str), wrap_lines=True)
-                else:
-                    col_current, col_proposed = st.columns(2)
-                    with col_current:
-                        st.caption("❌ **CURRENT VERSION** (In Database)")
-                        with st.container(height=280):
-                            st.code(current_val, language=get_code_language(str(current_val)), wrap_lines=True)
-                    with col_proposed:
-                        st.caption("✅ **PROPOSED VERSION** (From AI)")
-                        with st.container(height=280):
-                            st.code(new_content_str, language=get_code_language(new_content_str), wrap_lines=True)
+                # One scrolling diff pane (same on mobile + desktop). Side-by-side
+                # CURRENT/PROPOSED boxes scrolled independently and hid what changed.
+                st.caption("📝 **What changed** (unified diff)")
+                diff_height = 220 if narrow else 320
+                with st.container(height=diff_height):
+                    st.code(
+                        proposal_text_diff(current_val, new_content_str),
+                        language="diff",
+                        wrap_lines=True,
+                    )
+                with st.expander("Full CURRENT text", expanded=False):
+                    st.code(
+                        current_val if current_val else "(empty)",
+                        language=get_code_language(str(current_val)),
+                        wrap_lines=True,
+                    )
+                with st.expander("Full PROPOSED text", expanded=False):
+                    st.code(
+                        new_content_str if new_content_str else "(empty)",
+                        language=get_code_language(new_content_str),
+                        wrap_lines=True,
+                    )
 
                 b_col1, b_col2, b_col3 = st.columns([1, 1, 2] if narrow else [1, 1, 3])
                 if b_col1.button("✅ APPROVE", key=f"accept_{slot_name}", type="primary", use_container_width=True):
@@ -2511,24 +2515,24 @@ def save_replaces_most(current, proposed):
         return False
     return not shadow_preserves_existing(cur, new)
 
-def short_text_diff(old, new, max_lines=40):
+def short_text_diff(old, new, max_lines=40, head=50, tail=15, fromfile="saved", tofile="editor"):
     """A short unified diff. Long files are clipped before the comparison."""
     import difflib
 
-    def clip_lines(text, head=50, tail=15):
+    def clip_lines(text, head_n=head, tail_n=tail):
         lines = str(text or "").splitlines()
-        if len(lines) <= head + tail + 1:
+        if len(lines) <= head_n + tail_n + 1:
             return lines
-        skipped = len(lines) - head - tail
-        return lines[:head] + [f"... {skipped} lines omitted ..."] + lines[-tail:]
+        skipped = len(lines) - head_n - tail_n
+        return lines[:head_n] + [f"... {skipped} lines omitted ..."] + lines[-tail_n:]
 
     diff = difflib.unified_diff(
         clip_lines(old),
         clip_lines(new),
-        fromfile="saved",
-        tofile="editor",
+        fromfile=fromfile,
+        tofile=tofile,
         lineterm="",
-        n=1,
+        n=2,
     )
     out = []
     for line in diff:
@@ -2537,6 +2541,19 @@ def short_text_diff(old, new, max_lines=40):
             out.append("... diff truncated ...")
             break
     return "\n".join(out) if out else "(no line diff)"
+
+
+def proposal_text_diff(old, new):
+    """Staging-area diff: enough context to review Shadow/Harvest proposals."""
+    return short_text_diff(
+        old,
+        new,
+        max_lines=120,
+        head=80,
+        tail=40,
+        fromfile="current",
+        tofile="proposed",
+    )
 
 def report_harvest_error(title, message, context=None):
     if "harvest_errors" not in st.session_state:
