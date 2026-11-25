@@ -537,6 +537,7 @@ if not st.session_state.gemini_api_key and not st.session_state.deepseek_api_key
 st.markdown(
     """
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=swap');
         [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
         [data-testid="stSidebar"] textarea {
             color: #212121 !important;
@@ -578,7 +579,8 @@ st.markdown(
             overflow-x: hidden !important;
             overflow-y: auto !important;
             z-index: 1000100 !important;
-            padding: 0.75rem 0.85rem 1.25rem 1rem !important;
+            /* Extra top padding mirrors stSidebarHeader room for the chevron. */
+            padding: 2.4rem 0.85rem 1.25rem 1rem !important;
             box-sizing: border-box !important;
         }
         /* Live Preview sits left of Memory (or at the right edge when Memory is closed). */
@@ -614,31 +616,58 @@ st.markdown(
         .gatewai-lp-drag.dragging {
             background: rgba(49, 51, 63, 0.18) !important;
         }
-        .gatewai-rsb-edge-tab {
-            position: fixed !important;
-            top: 50% !important;
-            right: 0 !important;
-            transform: translateY(-50%) !important;
-            z-index: 1000103 !important;
-            background: #f0f2f6 !important;
-            border: 1px solid rgba(49, 51, 63, 0.2) !important;
-            border-right: none !important;
-            border-radius: 6px 0 0 6px !important;
-            padding: 0.55rem 0.35rem !important;
-            font-weight: 700 !important;
-            letter-spacing: -0.06em !important;
+        /* Mirror Streamlit's stSidebarCollapseButton / stExpandSidebarButton. */
+        .gatewai-rsb-chevron-btn {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            background: transparent !important;
+            border: none !important;
+            border-radius: 0.5rem !important;
+            padding: 0.2rem !important;
+            margin: 0 !important;
             cursor: pointer !important;
-            color: #31333F !important;
+            color: rgba(49, 51, 63, 0.6) !important; /* fadedText60 */
             line-height: 1 !important;
-            box-shadow: -1px 0 4px rgba(0,0,0,0.06) !important;
+            box-shadow: none !important;
+            min-width: 2rem !important;
+            min-height: 2rem !important;
         }
-        div.gatewai-rsb-collapse button {
-            font-weight: 700 !important;
-            letter-spacing: -0.05em;
-            min-height: 2.25rem;
+        .gatewai-rsb-chevron-btn:hover {
+            background: rgba(49, 51, 63, 0.1) !important;
+            color: rgba(49, 51, 63, 0.85) !important;
         }
-        /* Streamlit >> target for the edge tab — keep in DOM, hide from layout. */
-        div.gatewai-rsb-expand {
+        .gatewai-rsb-chevron-btn .material-symbols-outlined {
+            font-family: 'Material Symbols Outlined' !important;
+            font-size: 1.5rem !important;
+            font-weight: 400 !important;
+            line-height: 1 !important;
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        /* Collapse: top-left of right pane (content edge) — mirror of left sidebar's top-right. */
+        #gatewai-rsb-collapse-btn {
+            position: absolute !important;
+            top: 0.45rem !important;
+            left: 0.35rem !important;
+            z-index: 1000105 !important;
+        }
+        /* Expand: top-right of app header — mirror of stExpandSidebarButton (top-left). */
+        #gatewai-rsb-expand-btn.gatewai-rsb-expand-in-header {
+            position: relative !important;
+            top: auto !important;
+            right: auto !important;
+            margin-left: auto !important;
+            z-index: 1000200 !important;
+        }
+        #gatewai-rsb-expand-btn.gatewai-rsb-expand-floating {
+            position: fixed !important;
+            top: 0.35rem !important;
+            right: 0.55rem !important;
+            z-index: 1000200 !important;
+        }
+        /* Hidden Streamlit click targets driven by the mirrored chevron buttons. */
+        div.gatewai-rsb-expand,
+        div.gatewai-rsb-collapse-target {
             position: absolute !important;
             width: 1px !important;
             height: 1px !important;
@@ -2136,17 +2165,49 @@ def install_right_sidebar_chrome(open_slots, width_px):
     if (!shell) return null;
     let el = shell.closest('[data-testid="stVerticalBlock"]');
     if (!el) return shell.parentElement;
-    // Climb until this block owns the collapse control (full sidebar container),
-    // but stop before the page root that also holds GateWai/Editor.
-    while (el && !el.querySelector('.gatewai-rsb-collapse')) {{
+    // Climb until this block owns the sidebar shell/title, but stop before the
+    // page root that also holds GateWai/Editor.
+    while (el && !el.querySelector('.gatewai-rsb-shell')) {{
       const parent = el.parentElement
         && el.parentElement.closest('[data-testid="stVerticalBlock"]');
       if (!parent || parent === el) break;
-      // Don't promote into a block that also contains the main-view radio.
       if (parent.querySelector('[data-testid="stRadio"]')) break;
       el = parent;
     }}
+    while (el) {{
+      const parent = el.parentElement
+        && el.parentElement.closest('[data-testid="stVerticalBlock"]');
+      if (!parent || parent === el) break;
+      if (parent.querySelector('[data-testid="stRadio"]')) break;
+      if (parent.querySelector('.gatewai-lp-shell')) break;
+      if (!parent.querySelector('.gatewai-rsb-shell')) break;
+      el = parent;
+    }}
     return el;
+  }}
+
+  function clickStreamlitTarget(kind) {{
+    // Hidden Streamlit buttons keyed by label text.
+    const want = kind === 'collapse' ? '<<' : '>>';
+    const btn = Array.from(doc.querySelectorAll('button'))
+      .find(b => (b.innerText || '').trim() === want);
+    if (btn) btn.click();
+  }}
+
+  function makeChevronBtn(id, iconName, title, onClick) {{
+    let btn = doc.getElementById(id);
+    if (!btn) {{
+      btn = doc.createElement('button');
+      btn.id = id;
+      btn.type = 'button';
+      btn.className = 'gatewai-rsb-chevron-btn';
+      btn.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">'
+        + iconName + '</span>';
+      btn.addEventListener('click', onClick);
+    }}
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+    return btn;
   }}
 
   let _dragging = false;
@@ -2184,26 +2245,47 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }});
   }}
 
-  function ensureEdgeTab() {{
-    let tab = doc.getElementById('gatewai-rsb-edge-tab');
+  function ensureCollapseBtn(panel) {{
+    // keyboard_double_arrow_right — collapse toward the right (mirror of left sidebar's left arrows).
+    const btn = makeChevronBtn(
+      'gatewai-rsb-collapse-btn',
+      'keyboard_double_arrow_right',
+      'Collapse Memory slots sidebar',
+      function () {{ clickStreamlitTarget('collapse'); }}
+    );
+    if (btn.parentElement !== panel) panel.appendChild(btn);
+  }}
+
+  function ensureExpandBtn() {{
+    // Remove mid-screen edge tab if an older build left one around.
+    const legacy = doc.getElementById('gatewai-rsb-edge-tab');
+    if (legacy) legacy.remove();
+
+    let btn = doc.getElementById('gatewai-rsb-expand-btn');
     if (OPEN) {{
-      if (tab) tab.remove();
+      if (btn) btn.remove();
+      const c = doc.getElementById('gatewai-rsb-collapse-btn');
+      // collapse btn lives on the panel; leave it when open
       return;
     }}
-    if (!tab) {{
-      tab = doc.createElement('button');
-      tab.id = 'gatewai-rsb-edge-tab';
-      tab.className = 'gatewai-rsb-edge-tab';
-      tab.type = 'button';
-      tab.title = 'Expand Memory slots sidebar';
-      tab.textContent = '>>';
-      tab.addEventListener('click', function () {{
-        // Click the Streamlit expand control if present; else set a cookie flag.
-        const btn = Array.from(doc.querySelectorAll('button'))
-          .find(b => (b.innerText || '').trim() === '>>');
-        if (btn) btn.click();
-      }});
-      doc.body.appendChild(tab);
+    // keyboard_double_arrow_left — expand from the right (mirror of left sidebar's right arrows).
+    btn = makeChevronBtn(
+      'gatewai-rsb-expand-btn',
+      'keyboard_double_arrow_left',
+      'Expand Memory slots sidebar',
+      function () {{ clickStreamlitTarget('expand'); }}
+    );
+    // Prefer parking it in the app header (same strip as stExpandSidebarButton).
+    const toolbar = doc.querySelector('[data-testid="stToolbar"]')
+      || doc.querySelector('[data-testid="stHeader"]');
+    if (toolbar) {{
+      if (btn.parentElement !== toolbar) toolbar.appendChild(btn);
+      btn.classList.add('gatewai-rsb-expand-in-header');
+      btn.classList.remove('gatewai-rsb-expand-floating');
+    }} else {{
+      if (btn.parentElement !== doc.body) doc.body.appendChild(btn);
+      btn.classList.add('gatewai-rsb-expand-floating');
+      btn.classList.remove('gatewai-rsb-expand-in-header');
     }}
   }}
 
@@ -2220,10 +2302,16 @@ def install_right_sidebar_chrome(open_slots, width_px):
     if (OPEN && panel) {{
       panel.classList.add('gatewai-rsb-panel');
       ensureDrag(panel);
+      ensureCollapseBtn(panel);
     }} else if (panel) {{
       panel.classList.remove('gatewai-rsb-panel');
+      const c = doc.getElementById('gatewai-rsb-collapse-btn');
+      if (c) c.remove();
+    }} else {{
+      const c = doc.getElementById('gatewai-rsb-collapse-btn');
+      if (c) c.remove();
     }}
-    ensureEdgeTab();
+    ensureExpandBtn();
   }}
 
   // Always point at the latest mount (OPEN/WIDTH change every Streamlit rerun).
@@ -2256,17 +2344,14 @@ def render_app_memory_sidebar():
     # One nested block so JS can pin the whole sidebar without grabbing GateWai/Editor.
     with st.container():
         st.markdown('<div class="gatewai-rsb-shell" aria-hidden="true"></div>', unsafe_allow_html=True)
+        # Hidden Streamlit target — the visible control is the mirrored chevron in the pane header.
+        st.markdown('<div class="gatewai-rsb-collapse-target">', unsafe_allow_html=True)
+        if st.button("<<", key="memory_slots_collapse_btn", help="Collapse Memory slots sidebar"):
+            set_memory_slots_open(False)
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        collapse_col, title_col = st.columns([1, 4])
-        with collapse_col:
-            st.markdown('<div class="gatewai-rsb-collapse">', unsafe_allow_html=True)
-            if st.button("<<", key="memory_slots_collapse_btn", help="Collapse Memory slots sidebar", use_container_width=True):
-                set_memory_slots_open(False)
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-        with title_col:
-            st.markdown("### 📂 Memory")
-
+        st.markdown("### 📂 Memory")
         st.caption("Tap 🟢/⚪ to include or hide a slot in chat context. Drag the left border to resize.")
         # Panel itself scrolls like the left sidebar — no nested height box needed.
         render_memory_slot_sidebar("memory", height=None, show_meta=True)
