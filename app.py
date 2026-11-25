@@ -556,11 +556,35 @@ st.markdown(
             margin-top: 15px; margin-bottom: 5px; font-weight: bold;
             color: #424242; border-bottom: 1px solid #e0e0e0;
         }
-        /* Desktop-only: do NOT apply on mobile — 85vh on column 2 unglues staging/chat after submit. */
+        /* Right Memory-slots rail — mirror Streamlit's left sidebar (grey, bordered). */
+        [data-testid="column"]:has(.gatewai-rsb-marker) {
+            background-color: #f0f2f6 !important;
+            border-left: 1px solid rgba(49, 51, 63, 0.2) !important;
+            padding: 0.35rem 0.75rem 1rem 0.75rem !important;
+        }
+        [data-testid="column"]:has(.gatewai-rsb-marker) .section-header {
+            border-bottom-color: rgba(49, 51, 63, 0.15);
+        }
+        /* Desktop-only sticky scroll for the right rail (not mobile — unglues layout). */
         @media (min-width: 769px) {
-            [data-testid="column"]:nth-child(2) [data-testid="stVerticalBlock"] {
+            [data-testid="column"]:has(.gatewai-rsb-marker) > div {
+                position: sticky;
+                top: 0.25rem;
+                max-height: calc(100vh - 1rem);
+                overflow-y: auto;
+                padding-bottom: 1rem;
+            }
+            /* Preview column (no rsb marker) keeps the older pane scroll. */
+            [data-testid="column"]:nth-child(2):not(:has(.gatewai-rsb-marker)) [data-testid="stVerticalBlock"] {
                 height: 85vh; overflow-y: auto; border-left: 1px solid #e0e0e0; padding-left: 20px;
             }
+        }
+        /* Collapse / expand chevrons match left-sidebar control weight. */
+        div.gatewai-rsb-collapse button,
+        div.gatewai-rsb-expand button {
+            font-weight: 700 !important;
+            letter-spacing: -0.05em;
+            min-height: 2.25rem;
         }
         div.stButton > button:first-child { width: 100%; border-radius: 5px; }
         .purge-btn { border: 1px solid #ff4b4b; color: #ff4b4b; }
@@ -1200,6 +1224,8 @@ def render_memory_slot_sidebar(key_prefix, height=480, show_meta=True):
                 use_container_width=True,
             ):
                 st.session_state.selected_file = fname
+                # Keep Live Preview focused on the same file when it's open.
+                st.session_state["expanded_slot"] = fname
                 st.rerun()
         with active_col:
             if fname in core_files:
@@ -1944,8 +1970,19 @@ def persist_ui_layout_prefs(project_name=None):
             st.session_state.get("show_memory_slots", False),
         )
     )
+    try:
+        width = int(
+            st.session_state.get(
+                "memory_slots_width_pref",
+                st.session_state.get("memory_slots_width", 28),
+            )
+        )
+    except (TypeError, ValueError):
+        width = 28
+    width = max(18, min(48, width))
     # One shared rail for GateWai + Editor; keep legacy keys in sync for old clients.
     existing["show_memory_slots"] = open_slots
+    existing["memory_slots_width"] = width
     existing["gatewai_show_slots"] = open_slots
     existing["show_file_list"] = open_slots
     try:
@@ -1957,18 +1994,171 @@ def persist_ui_layout_prefs(project_name=None):
         print(f"ERROR: persist_ui_layout_prefs failed: {e}")
 
 
-def remember_memory_slots_pref():
-    """Keep the right Memory-slots rail open/closed across GateWai ↔ Editor."""
-    if "show_memory_slots" in st.session_state:
-        st.session_state.show_memory_slots_pref = bool(st.session_state.show_memory_slots)
-        persist_ui_layout_prefs()
+def set_memory_slots_open(open_slots):
+    """Expand/collapse the right Memory-slots sidebar (mirrors left sidebar chevrons)."""
+    open_slots = bool(open_slots)
+    st.session_state.show_memory_slots = open_slots
+    st.session_state.show_memory_slots_pref = open_slots
+    persist_ui_layout_prefs()
+
+
+def memory_slots_width_pct():
+    """Persisted width of the right Memory-slots rail (percent of the main row)."""
+    if "memory_slots_width_pref" not in st.session_state:
+        st.session_state.memory_slots_width_pref = 28
+    try:
+        width = int(st.session_state.memory_slots_width_pref)
+    except (TypeError, ValueError):
+        width = 28
+    return max(18, min(48, width))
+
+
+def memory_slots_column_spec():
+    """Return (main_weight, rail_weight) for an open right sidebar."""
+    w = memory_slots_width_pct()
+    return [max(52, 100 - w), w]
 
 
 def render_memory_slots_rail(height=520, show_meta=True):
-    """Right-rail Memory slots panel (shared by GateWai and Editor)."""
-    st.markdown("### 📂 Memory")
+    """Grey right sidebar (symmetrical to st.sidebar): << collapse + resizable width."""
+    # Marker for CSS — paints this column like the left sidebar.
+    st.markdown('<div class="gatewai-rsb-marker" aria-hidden="true"></div>', unsafe_allow_html=True)
+
+    collapse_col, title_col = st.columns([1, 4])
+    with collapse_col:
+        st.markdown('<div class="gatewai-rsb-collapse">', unsafe_allow_html=True)
+        if st.button("<<", key="memory_slots_collapse_btn", help="Collapse Memory slots sidebar", use_container_width=True):
+            set_memory_slots_open(False)
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    with title_col:
+        st.markdown("### 📂 Memory")
+
+    if "memory_slots_width" not in st.session_state:
+        st.session_state.memory_slots_width = memory_slots_width_pct()
+
+    def _remember_memory_slots_width():
+        try:
+            st.session_state.memory_slots_width_pref = max(
+                18, min(48, int(st.session_state.memory_slots_width))
+            )
+        except (TypeError, ValueError):
+            st.session_state.memory_slots_width_pref = 28
+        persist_ui_layout_prefs()
+
+    st.slider(
+        "Sidebar width",
+        min_value=18,
+        max_value=48,
+        key="memory_slots_width",
+        help="Drag to widen or narrow the Memory slots sidebar.",
+        on_change=_remember_memory_slots_width,
+    )
+
     st.caption("Tap 🟢/⚪ to include or hide a slot in chat context.")
     render_memory_slot_sidebar("memory", height=height, show_meta=show_meta)
+
+
+def render_live_preview_pane():
+    """GateWai Live Preview — artifacts + slot content (center pane, not the right rail).
+
+    Memory slots (file list / Active toggles) live in the grey right sidebar.
+    Live Preview keeps HTML artifacts, web context, and open-slot content reading.
+    """
+    st.subheader("📋 Live Preview")
+    st.caption("Artifacts and slot contents. Use the right Memory sidebar to pick Active files.")
+
+    # A. HTML ARTIFACTS
+    if st.session_state.messages:
+        last_msg = st.session_state.messages[-1]
+        if last_msg["role"] == "model":
+            html_content = extract_html(last_msg["content"])
+            if html_content:
+                st.success("🖼️ Live Artifact Detected")
+                with st.expander("Show Rendered View", expanded=True):
+                    components.html(html_content, height=600, scrolling=True)
+
+    # B. WEB CONTEXT
+    if st.session_state.temp_web_ctx:
+        st.info("🌐 **WEB CONTENT ACTIVE**")
+        with st.expander("View Scraped Data"):
+            st.write(st.session_state.temp_web_ctx[:500] + "...")
+
+    # C. Dynamic Height Control
+    box_height = st.slider(
+        "Content Box Height",
+        min_value=100,
+        max_value=800,
+        value=550,
+        step=50,
+        help="Adjust the height of the content box.",
+        key="live_preview_box_height",
+    )
+
+    # D. Core Memory Slots — body is rendered only for the slot you open
+    st.caption("🧠 Core Memory (open one slot to preview it)")
+    for key, slot_name in CORE_SCHEMA.items():
+        if slot_name == "SI_Identity":
+            continue
+        expanded = (st.session_state.get("expanded_slot") == slot_name)
+        if expanded:
+            val = st.session_state.get(slot_name, "")
+            with st.expander(f"**{slot_name}**", expanded=True):
+                if st.button(
+                    f"Close {slot_name}",
+                    key=f"select_{slot_name}",
+                    type="secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state["expanded_slot"] = None
+                    st.rerun()
+                with st.container(height=box_height, border=True):
+                    st.markdown(val if val else "*Empty*", unsafe_allow_html=True)
+        else:
+            chars = len(str(st.session_state.get(slot_name, "") or ""))
+            if st.button(
+                f"{slot_name}  ({chars:,})",
+                key=f"select_{slot_name}",
+                use_container_width=True,
+            ):
+                st.session_state["expanded_slot"] = slot_name
+                st.rerun()
+
+    # E. User Slots — same rule: no HTML until the slot is opened
+    if "loaded_slots_metadata" in st.session_state:
+        user_slots = [
+            k for k, v in st.session_state.loaded_slots_metadata.items()
+            if v.get("slot_type") == "user"
+        ]
+        if user_slots:
+            st.caption("📁 User Files (open one file to preview it)")
+            for slot_name in user_slots:
+                if slot_name == "SI_Identity":
+                    continue
+                expanded = (st.session_state.get("expanded_slot") == slot_name)
+                if expanded:
+                    val = st.session_state.get(slot_name, "")
+                    with st.expander(f"**{slot_name}**", expanded=True):
+                        if st.button(
+                            f"Close {slot_name}",
+                            key=f"select_user_{slot_name}",
+                            type="secondary",
+                            use_container_width=True,
+                        ):
+                            st.session_state["expanded_slot"] = None
+                            st.rerun()
+                        with st.container(height=box_height, border=True):
+                            st.markdown(val if val else "*Empty*", unsafe_allow_html=True)
+                else:
+                    chars = len(str(st.session_state.get(slot_name, "") or ""))
+                    if st.button(
+                        f"{slot_name}  ({chars:,})",
+                        key=f"select_user_{slot_name}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["expanded_slot"] = slot_name
+                        st.rerun()
+
 
 def engine_room_widget_key(canonical, project=None):
     project = project if project is not None else st.session_state.get("active_project", "")
@@ -2116,6 +2306,9 @@ def save_project_state(state, name, silent=False):
                 "auto_shadow_active": saved_config_value("auto_shadow_active", "auto_shadow_active", True),
                 "show_memory_slots": saved_config_value(
                     "show_memory_slots_pref", "show_memory_slots", False
+                ),
+                "memory_slots_width": saved_config_value(
+                    "memory_slots_width_pref", "memory_slots_width", 28
                 ),
                 # Legacy aliases — same shared rail.
                 "gatewai_show_slots": saved_config_value(
@@ -4150,6 +4343,12 @@ if st.session_state.loaded_project != st.session_state.active_project:
         )
         st.session_state.show_memory_slots_pref = _slots_open
         st.session_state.show_memory_slots = _slots_open
+        try:
+            _slots_w = int(cfg.get("memory_slots_width", 28) or 28)
+        except (TypeError, ValueError):
+            _slots_w = 28
+        st.session_state.memory_slots_width_pref = max(18, min(48, _slots_w))
+        st.session_state.memory_slots_width = st.session_state.memory_slots_width_pref
          # --- DEBUG: Print session state after loading ---
 #        print(f"DEBUG LOAD_PROJECT_STATE: st.session_state.last_harvest_message_index set to {st.session_state.last_harvest_message_index}")
     else:
@@ -4687,7 +4886,11 @@ with st.sidebar:
     with tab_desk:
 
         # 1. LIVE PREVIEW
-        st.session_state.show_preview = st.toggle("👁️ Show Live Preview", value=st.session_state.show_preview)
+        st.session_state.show_preview = st.toggle(
+            "👁️ Show Live Preview",
+            value=st.session_state.show_preview,
+            help="Shows artifacts and slot contents beside chat. The grey Memory sidebar (>>) stays on the right for Active file toggles.",
+        )
 
         # 2. TELEMETRY
         st.markdown('<div class="section-header">⛽ ROLE TELEMETRY</div>', unsafe_allow_html=True)
@@ -6622,13 +6825,14 @@ _MAIN_EDITOR = "📝 Editor"
 if "main_view_selector" not in st.session_state:
     st.session_state.main_view_selector = _MAIN_GATEWAI
 
-# Shared Memory-slots toggle lives ABOVE both views so it stays mounted when
-# switching GateWai ↔ Editor (Streamlit drops unused widget keys otherwise).
+# Shared Memory-slots >> / << lives ABOVE both views so open/closed survives
+# GateWai ↔ Editor (Streamlit drops unused widget keys otherwise).
 if "show_memory_slots_pref" not in st.session_state:
     st.session_state.show_memory_slots_pref = False
-if "show_memory_slots" not in st.session_state:
-    st.session_state.show_memory_slots = bool(st.session_state.show_memory_slots_pref)
-_view_toggle, _slots_toggle = st.columns([3, 1])
+_show_slots = bool(st.session_state.show_memory_slots_pref)
+st.session_state.show_memory_slots = _show_slots
+
+_view_toggle, _slots_toggle = st.columns([6, 1])
 with _view_toggle:
     main_view = st.radio(
         "Main view",
@@ -6638,14 +6842,14 @@ with _view_toggle:
         label_visibility="collapsed",
     )
 with _slots_toggle:
-    st.checkbox(
-        "📂 Memory slots",
-        key="show_memory_slots",
-        help="Show the memory-slot list as a right sidebar on GateWai and Editor.",
-        on_change=remember_memory_slots_pref,
-    )
-st.session_state.show_memory_slots_pref = bool(st.session_state.show_memory_slots)
-_show_slots = bool(st.session_state.show_memory_slots_pref)
+    # Collapsed: >> expands the grey right sidebar (mirrors left-sidebar chevron).
+    # Expanded: << lives inside the rail itself.
+    if not _show_slots:
+        st.markdown('<div class="gatewai-rsb-expand">', unsafe_allow_html=True)
+        if st.button(">>", key="memory_slots_expand_btn", help="Expand Memory slots sidebar", use_container_width=True):
+            set_memory_slots_open(True)
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================================================
 # VIEW 1: GateWai (Chat & Artifacts)
@@ -6659,25 +6863,27 @@ if main_view == _MAIN_GATEWAI:
         st.session_state.get("prompt_submit_in_flight")
     ) or bool(_pending_now_prompt) or bool(st.session_state.get("pending_updates"))
     _mobile = is_mobile_client()
-    # Desktop right sidebar; on mobile / busy turns use an expander under chat instead.
-    _use_slots_split = _show_slots and not _mobile and not _turn_busy
-    # Never split chat/preview on phones — two columns + staging unglues the page.
-    # Prefer memory-slot sidebar over preview when both would compete.
-    _use_preview_split = (
-        bool(st.session_state.show_preview)
-        and not _turn_busy
-        and not _mobile
-        and not _use_slots_split
-    )
+    _want_slots = _show_slots and not _mobile and not _turn_busy
+    _want_preview = bool(st.session_state.show_preview) and not _turn_busy and not _mobile
+    # Layout:
+    #   Memory rail (grey, right) is the file-list sidebar.
+    #   Live Preview is a center content pane — it no longer steals the right rail.
+    #   Both can be open: Chat | Preview | Memory.
     col_slots = None
-    if _use_slots_split:
-        col_chat, col_slots = st.columns([3, 1])
-        col_preview = None
-    elif _use_preview_split:
+    col_preview = None
+    if _want_slots and _want_preview:
+        _rail = memory_slots_width_pct()
+        _main = max(52, 100 - _rail)
+        _chat = max(26, int(_main * 0.5))
+        _prev = max(26, _main - _chat)
+        col_chat, col_preview, col_slots = st.columns([_chat, _prev, _rail])
+    elif _want_slots:
+        _main_w, _rail_w = memory_slots_column_spec()
+        col_chat, col_slots = st.columns([_main_w, _rail_w])
+    elif _want_preview:
         col_chat, col_preview = st.columns(2)
     else:
         col_chat = st.container()
-        col_preview = None
 
     with col_chat:
         # Last chance: strip abandoned user bubbles before chat paints (no banner).
@@ -6700,10 +6906,13 @@ if main_view == _MAIN_GATEWAI:
         # Staging lives here (same tab as chat) — not above the tabs.
         render_staging_area()
 
-        # Mobile / busy: slot list under chat (not a second column that unglues layout).
+        # Mobile / busy: preview + slots under chat (not extra columns that unglue layout).
         if _show_slots and col_slots is None:
             with st.expander("📂 Memory slots", expanded=True):
                 render_memory_slot_sidebar("memory", height=280, show_meta=False)
+        if bool(st.session_state.show_preview) and col_preview is None and not _turn_busy:
+            with st.expander("📋 Live Preview", expanded=False):
+                render_live_preview_pane()
 
         # Collapsed by default — an open debugger after submit was blowing mobile layout
         # and stealing scroll away from the chat pane.
@@ -6729,79 +6938,13 @@ if main_view == _MAIN_GATEWAI:
                 else:
                     st.code("Waiting for input...", wrap_lines=True)
 
+    if col_preview is not None:
+        with col_preview:
+            render_live_preview_pane()
+
     if col_slots is not None:
         with col_slots:
             render_memory_slots_rail(height=520, show_meta=True)
-
-
-#    print("after with col_chat") # <-- ADD THIS LINE
-
-
-    # Preview Column (Smart Renderer) — skipped while a chat turn is in flight
-    if col_preview and _use_preview_split:
-        with col_preview:
-            st.subheader("📋 Memory & Artifacts")
-
-            # A. HTML ARTIFACTS
-            if st.session_state.messages:
-                last_msg = st.session_state.messages[-1]
-                if last_msg["role"] == "model":
-                    html_content = extract_html(last_msg["content"])
-                    if html_content:
-                        st.success("🖼️ Live Artifact Detected")
-                        with st.expander("Show Rendered View", expanded=True):
-                            components.html(html_content, height=600, scrolling=True)
-
-            # B. WEB CONTEXT
-            if st.session_state.temp_web_ctx:
-                st.info("🌐 **WEB CONTENT ACTIVE**")
-                with st.expander("View Scraped Data"): st.write(st.session_state.temp_web_ctx[:500] + "...")
-
-            # C. Dynamic Height Control
-            box_height = st.slider("Content Box Height", min_value=100, max_value=800, value=550, step=50, help="Adjust the height of the content box.")
-
-            # D. Core Memory Slots — body is rendered only for the slot you open
-            st.caption("🧠 Core Memory (open one slot to preview it)")
-            for key, slot_name in CORE_SCHEMA.items():
-                if slot_name == "SI_Identity":
-                    continue
-                expanded = (st.session_state.get("expanded_slot") == slot_name)
-                if expanded:
-                    val = st.session_state.get(slot_name, "")
-                    with st.expander(f"**{slot_name}**", expanded=True):
-                        if st.button(f"Close {slot_name}", key=f"select_{slot_name}", type="secondary", use_container_width=True):
-                            st.session_state["expanded_slot"] = None
-                            st.rerun()
-                        with st.container(height=box_height, border=True):
-                            st.markdown(val if val else "*Empty*", unsafe_allow_html=True)
-                else:
-                    chars = len(str(st.session_state.get(slot_name, "") or ""))
-                    if st.button(f"{slot_name}  ({chars:,})", key=f"select_{slot_name}", use_container_width=True):
-                        st.session_state["expanded_slot"] = slot_name
-                        st.rerun()
-
-            # E. User Slots — same rule: no HTML until the slot is opened
-            if "loaded_slots_metadata" in st.session_state:
-                user_slots = [k for k, v in st.session_state.loaded_slots_metadata.items() if v['slot_type'] == 'user']
-                if user_slots:
-                    st.caption("📁 User Files (open one file to preview it)")
-                    for slot_name in user_slots:
-                        if slot_name == "SI_Identity":
-                            continue
-                        expanded = (st.session_state.get("expanded_slot") == slot_name)
-                        if expanded:
-                            val = st.session_state.get(slot_name, "")
-                            with st.expander(f"**{slot_name}**", expanded=True):
-                                if st.button(f"Close {slot_name}", key=f"select_user_{slot_name}", type="secondary", use_container_width=True):
-                                    st.session_state["expanded_slot"] = None
-                                    st.rerun()
-                                with st.container(height=box_height, border=True):
-                                    st.markdown(val if val else "*Empty*", unsafe_allow_html=True)
-                        else:
-                            chars = len(str(st.session_state.get(slot_name, "") or ""))
-                            if st.button(f"{slot_name}  ({chars:,})", key=f"select_user_{slot_name}", use_container_width=True):
-                                st.session_state["expanded_slot"] = slot_name
-                                st.rerun()
 
 # =========================================================
 # VIEW 2: EDITOR (The Integrated IDE)
@@ -6812,7 +6955,8 @@ else:
     _mobile_ed = is_mobile_client()
     _use_editor_slots = _show_slots and not _mobile_ed
     if _use_editor_slots:
-        col_editor, col_slots = st.columns([3, 1])
+        _main_w, _rail_w = memory_slots_column_spec()
+        col_editor, col_slots = st.columns([_main_w, _rail_w])
     else:
         col_editor = st.container()
         col_slots = None
