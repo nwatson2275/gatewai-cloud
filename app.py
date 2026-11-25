@@ -776,6 +776,41 @@ st.markdown(
                 -webkit-overflow-scrolling: touch !important;
                 touch-action: pan-y !important;
             }
+            /*
+              Mobile uses Memory/Preview expanders — never the desktop right rail.
+              localStorage "open" was still insetting a blank strip with no panel.
+            */
+            :root {
+                --gatewai-rsb-width: 0px !important;
+                --gatewai-lp-width: 0px !important;
+                --gatewai-right-chrome: 0px !important;
+            }
+            [data-testid="stAppViewContainer"] {
+                width: 100% !important;
+                max-width: 100% !important;
+            }
+            section.main,
+            [data-testid="stMain"] {
+                right: 0 !important;
+            }
+            .gatewai-rsb-panel,
+            .gatewai-lp-panel,
+            #gatewai-rsb-expand-btn,
+            #gatewai-rsb-collapse-btn,
+            .gatewai-rsb-drag,
+            .gatewai-lp-drag {
+                display: none !important;
+                width: 0 !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+            }
+            [data-testid="stToastContainer"],
+            [data-testid="toastContainer"],
+            .stToastContainer,
+            [data-testid="stToast"],
+            .stToast {
+                right: 0.75rem !important;
+            }
         }
         /* Keep snap iframes out of flex flow — never display:none (Safari skips those scripts). */
         section.main iframe[height="0"],
@@ -827,7 +862,18 @@ def install_boot_veil():
   const MAX_W = {_RSB_MAX_WIDTH_PX};
   const DEF_W = {_RSB_DEFAULT_WIDTH_PX};
 
-  // Mirror st.sidebar: width/open known before widgets exist.
+  // Phone / narrow viewport: Memory is an expander — never reserve right chrome.
+  const narrow = (function () {{
+    try {{
+      if (w.matchMedia && w.matchMedia('(max-width: 768px)').matches) return true;
+    }} catch (e) {{}}
+    try {{
+      const ua = String(w.navigator && w.navigator.userAgent || '').toLowerCase();
+      return /mobile|android|iphone|ipod|ipad|webos|iemobile/.test(ua);
+    }} catch (e2) {{}}
+    return false;
+  }})();
+
   let open = true;
   try {{
     const saved = w.localStorage.getItem(OPEN_LS);
@@ -838,9 +884,18 @@ def install_boot_veil():
     const ls = parseInt(w.localStorage.getItem(WIDTH_LS) || '', 10);
     if (ls) widthPx = Math.max(MIN_W, Math.min(MAX_W, ls));
   }} catch (e) {{}}
+  if (narrow) {{
+    open = false;
+    widthPx = 0;
+  }}
   html.style.setProperty('--gatewai-rsb-width', open ? (widthPx + 'px') : '0px');
   html.classList.toggle('gatewai-rsb-closed', !open);
   html.classList.add('gatewai-lp-closed');
+  if (narrow) {{
+    html.style.setProperty('--gatewai-right-chrome', '0px');
+    const expand = doc.getElementById('gatewai-rsb-expand-btn');
+    if (expand) expand.remove();
+  }}
 
   w.__gatewaiBootClear = function () {{
     try {{ html.classList.remove('gatewai-booting'); }} catch (e) {{}}
@@ -2466,14 +2521,18 @@ def memory_slots_width_px():
     return width
 
 
-def install_right_sidebar_chrome(open_slots, width_px):
+def install_right_sidebar_chrome(open_slots, width_px, enabled=True):
     """Memory rail like st.sidebar: CSS-fixed from first paint; JS only open/width.
 
     Staging remounts used to leave the file list in main for ~50ms (ghost) while
     JS waited to add a class. CSS :has(.gatewai-rsb-shell) owns position; we mount
     synchronously when the shell appears.
+
+    enabled=False (mobile): force zero width and strip expand chrome so a desktop
+    localStorage "open" cannot leave a blank bar with no panel to close.
     """
     open_js = "true" if open_slots else "false"
+    enabled_js = "true" if enabled else "false"
     width_px = int(_clamp_rsb_width_px(width_px))
     components.html(
         f"""
@@ -2489,7 +2548,46 @@ def install_right_sidebar_chrome(open_slots, width_px):
   const COOKIE = '{_RSB_WIDTH_COOKIE}';
   const OPEN_LS = '{_RSB_OPEN_LS}';
   const OPEN_COOKIE = '{_RSB_OPEN_COOKIE}';
-  const FLAG = '__gatewaiRightSidebarChromeV6';
+  const FLAG = '__gatewaiRightSidebarChromeV7';
+  const ENABLED = {enabled_js};
+
+  function isNarrow() {{
+    try {{
+      if (w.matchMedia && w.matchMedia('(max-width: 768px)').matches) return true;
+    }} catch (e) {{}}
+    try {{
+      const ua = String(w.navigator && w.navigator.userAgent || '').toLowerCase();
+      return /mobile|android|iphone|ipod|ipad|webos|iemobile/.test(ua);
+    }} catch (e2) {{}}
+    return false;
+  }}
+
+  // Desktop rail only. Narrow / mobile always disables (even if Python missed UA).
+  if (!ENABLED || isNarrow()) {{
+    html.style.setProperty('--gatewai-rsb-width', '0px');
+    html.style.setProperty('--gatewai-lp-width', '0px');
+    html.style.setProperty('--gatewai-right-chrome', '0px');
+    html.classList.add('gatewai-rsb-closed');
+    html.classList.add('gatewai-lp-closed');
+    Array.from(doc.querySelectorAll('.gatewai-rsb-panel, .gatewai-lp-panel')).forEach(function (n) {{
+      n.classList.remove('gatewai-rsb-panel', 'gatewai-lp-panel');
+      n.style.removeProperty('width');
+      n.style.removeProperty('right');
+      n.style.removeProperty('position');
+    }});
+    const ex = doc.getElementById('gatewai-rsb-expand-btn');
+    if (ex) ex.remove();
+    const cl = doc.getElementById('gatewai-rsb-collapse-btn');
+    if (cl) cl.remove();
+    Array.from(doc.querySelectorAll('[data-testid="stAppViewContainer"]')).forEach(function (el) {{
+      el.style.setProperty('width', '100%', 'important');
+      el.style.setProperty('max-width', '100%', 'important');
+    }});
+    Array.from(doc.querySelectorAll('section.main, [data-testid="stMain"]')).forEach(function (el) {{
+      el.style.setProperty('right', '0px', 'important');
+    }});
+    return;
+  }}
 
   let open = {open_js};
   try {{
@@ -7863,7 +7961,13 @@ main_view = st.radio(
 
 # Chrome observer first; Memory rail mounts AFTER the main view so GateWai/Editor
 # paint before the file list (avoids middle "Editor" flash on refresh).
-install_right_sidebar_chrome(_show_slots if _use_app_rsb else False, _rsb_width)
+# Mobile: still call with enabled=False so leftover desktop chrome/localStorage
+# cannot leave a blank right strip.
+install_right_sidebar_chrome(
+    _show_slots if _use_app_rsb else False,
+    _rsb_width,
+    enabled=_use_app_rsb,
+)
 
 # =========================================================
 # VIEW 1: GateWai (Chat & Artifacts)
