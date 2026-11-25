@@ -2219,30 +2219,42 @@ def install_right_sidebar_chrome(open_slots, width_px):
     return px;
   }}
 
+  function isMainChrome(node) {{
+    // Never treat the GateWai/Editor column as the Memory pane — that emptied the middle.
+    if (!node || !node.querySelector) return true;
+    if (node.querySelector('[data-testid="stChatMessage"]')) return true;
+    if (node.querySelector('[data-testid="stChatInput"]')) return true;
+    if (node.querySelector('[data-testid="stRadio"]')) return true;
+    if (node.querySelector('[role="radiogroup"]')) return true;
+    if (node.querySelector('.ace_editor')) return true;
+    if (node.querySelector('.gatewai-lp-shell')) return true;
+    return false;
+  }}
+
   function findPanel() {{
     const shell = doc.querySelector('.gatewai-rsb-shell');
     if (!shell) return null;
+    // Prefer the dedicated st.container block around the Memory sidebar only.
     let el = shell.closest('[data-testid="stVerticalBlock"]');
-    if (!el) return shell.parentElement;
-    // Climb until this block owns the sidebar shell/title, but stop before the
-    // page root that also holds GateWai/Editor.
-    while (el && !el.querySelector('.gatewai-rsb-shell')) {{
-      const parent = el.parentElement
-        && el.parentElement.closest('[data-testid="stVerticalBlock"]');
-      if (!parent || parent === el) break;
-      if (parent.querySelector('[data-testid="stRadio"]')) break;
-      el = parent;
-    }}
+    if (!el) return shell.closest('[data-testid="element-container"]') || shell.parentElement;
     while (el) {{
       const parent = el.parentElement
         && el.parentElement.closest('[data-testid="stVerticalBlock"]');
       if (!parent || parent === el) break;
-      if (parent.querySelector('[data-testid="stRadio"]')) break;
-      if (parent.querySelector('.gatewai-lp-shell')) break;
+      if (isMainChrome(parent)) break;
       if (!parent.querySelector('.gatewai-rsb-shell')) break;
       el = parent;
     }}
+    if (isMainChrome(el)) {{
+      return shell.closest('[data-testid="element-container"]') || shell.parentElement;
+    }}
     return el;
+  }}
+
+  function scrubMisappliedPanels() {{
+    Array.from(doc.querySelectorAll('.gatewai-rsb-panel')).forEach(function (node) {{
+      if (isMainChrome(node)) node.classList.remove('gatewai-rsb-panel');
+    }});
   }}
 
   function isDecoyChevron(btn) {{
@@ -2413,6 +2425,7 @@ def install_right_sidebar_chrome(open_slots, width_px):
   function mount() {{
     if (_dragging) return;
     hideDecoyChevrons();
+    scrubMisappliedPanels();
     // Prefer last dragged width from localStorage over the Python snapshot.
     let startW = WIDTH;
     try {{
@@ -2421,17 +2434,18 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }} catch (e) {{}}
     applyWidth(startW);
     const panel = findPanel();
-    if (OPEN && panel) {{
+    if (OPEN && panel && !isMainChrome(panel)) {{
       panel.classList.add('gatewai-rsb-panel');
       ensureDrag(panel);
       ensureCollapseBtn(panel);
-    }} else if (panel) {{
-      panel.classList.remove('gatewai-rsb-panel');
-      const c = doc.getElementById('gatewai-rsb-collapse-btn');
-      if (c) c.remove();
     }} else {{
+      if (panel) panel.classList.remove('gatewai-rsb-panel');
       const c = doc.getElementById('gatewai-rsb-collapse-btn');
       if (c) c.remove();
+      if (OPEN && (!panel || isMainChrome(panel))) {{
+        // Fail safe: don't leave the app pushed aside with no real pane.
+        doc.documentElement.style.setProperty('--gatewai-rsb-width', '0px');
+      }}
     }}
     ensureExpandBtn();
   }}
@@ -2561,29 +2575,40 @@ def install_live_preview_chrome(open_preview, width_px):
     return px;
   }}
 
+  function isMainChrome(node) {{
+    if (!node || !node.querySelector) return true;
+    if (node.querySelector('[data-testid="stChatMessage"]')) return true;
+    if (node.querySelector('[data-testid="stChatInput"]')) return true;
+    if (node.querySelector('[data-testid="stRadio"]')) return true;
+    if (node.querySelector('[role="radiogroup"]')) return true;
+    if (node.querySelector('.ace_editor')) return true;
+    if (node.querySelector('.gatewai-rsb-shell')) return true;
+    return false;
+  }}
+
   function findPanel() {{
     const shell = doc.querySelector('.gatewai-lp-shell');
     if (!shell) return null;
     let el = shell.closest('[data-testid="stVerticalBlock"]');
-    if (!el) return shell.parentElement;
-    while (el && !el.querySelector('.gatewai-lp-shell')) {{
-      const parent = el.parentElement
-        && el.parentElement.closest('[data-testid="stVerticalBlock"]');
-      if (!parent || parent === el) break;
-      if (parent.querySelector('[data-testid="stRadio"]')) break;
-      el = parent;
-    }}
-    // Prefer the container that owns the shell and the preview body.
+    if (!el) return shell.closest('[data-testid="element-container"]') || shell.parentElement;
     while (el) {{
       const parent = el.parentElement
         && el.parentElement.closest('[data-testid="stVerticalBlock"]');
       if (!parent || parent === el) break;
-      if (parent.querySelector('[data-testid="stRadio"]')) break;
-      if (parent.querySelector('.gatewai-rsb-shell')) break;
+      if (isMainChrome(parent)) break;
       if (!parent.querySelector('.gatewai-lp-shell')) break;
       el = parent;
     }}
+    if (isMainChrome(el)) {{
+      return shell.closest('[data-testid="element-container"]') || shell.parentElement;
+    }}
     return el;
+  }}
+
+  function scrubMisappliedPanels() {{
+    Array.from(doc.querySelectorAll('.gatewai-lp-panel')).forEach(function (node) {{
+      if (isMainChrome(node)) node.classList.remove('gatewai-lp-panel');
+    }});
   }}
 
   let _dragging = false;
@@ -2623,6 +2648,7 @@ def install_live_preview_chrome(open_preview, width_px):
 
   function mount() {{
     if (_dragging) return;
+    scrubMisappliedPanels();
     let startW = WIDTH;
     try {{
       const ls = parseInt(w.localStorage.getItem(LS_KEY) || '', 10);
@@ -2630,16 +2656,15 @@ def install_live_preview_chrome(open_preview, width_px):
     }} catch (e) {{}}
     applyWidth(startW);
     const panel = findPanel();
-    if (OPEN && panel) {{
+    if (OPEN && panel && !isMainChrome(panel)) {{
       panel.classList.add('gatewai-lp-panel');
-      // Keep preview scrolled to its own top on mount.
       try {{ panel.scrollTop = 0; }} catch (e) {{}}
       ensureDrag(panel);
-    }} else if (panel) {{
-      panel.classList.remove('gatewai-lp-panel');
-    }} else if (!OPEN) {{
-      applyWidth(0);
-      doc.documentElement.style.setProperty('--gatewai-lp-width', '0px');
+    }} else {{
+      if (panel) panel.classList.remove('gatewai-lp-panel');
+      if (!OPEN || !panel || isMainChrome(panel)) {{
+        doc.documentElement.style.setProperty('--gatewai-lp-width', '0px');
+      }}
     }}
   }}
 
