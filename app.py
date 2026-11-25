@@ -1457,12 +1457,26 @@ def render_memory_slot_sidebar(key_prefix, height=480, show_meta=True):
                 type="primary" if is_selected else "secondary",
                 use_container_width=True,
             ):
+                _gatewai = "💬 GateWai"
+                _editor = "📝 Editor"
+                current_view = st.session_state.get("main_view_selector", _gatewai)
+                # Same slot while already in Editor → back to GateWai at the
+                # scroll position captured when we left chat (not jump to end).
+                if (
+                    is_selected
+                    and current_view == _editor
+                    and not st.session_state.get("show_preview")
+                ):
+                    st.session_state._pending_main_view = _gatewai
+                    st.session_state._preserve_gatewai_chat_scroll = True
+                    st.rerun()
                 st.session_state.selected_file = fname
                 st.session_state["expanded_slot"] = fname
                 # Live Preview off → open the slot in Editor. Preview on → stay on GateWai.
                 # Can't write main_view_selector after the radio exists — queue for next run.
                 if not st.session_state.get("show_preview"):
-                    st.session_state._pending_main_view = "📝 Editor"
+                    # Scroll Y is already in sessionStorage via capture hook.
+                    st.session_state._pending_main_view = _editor
                 st.rerun()
         with active_col:
             if fname in core_files:
@@ -2282,56 +2296,118 @@ def set_memory_slots_open(open_slots):
     persist_ui_layout_prefs()
 
 
-def restore_gatewai_chat_scroll_if_needed():
-    """After a right-sidebar remount, put the chat pane back where the user left it."""
-    if not st.session_state.pop("_restore_gatewai_chat_scroll", False):
-        return
+_CHAT_SCROLL_LS = "gatewai_chat_scroll_top"
+
+
+def install_gatewai_chat_scroll_capture():
+    """Keep chat pane Y in sessionStorage so Editor ↔ GateWai can restore it."""
     components.html(
-        """
+        f"""
 <script>
-(function () {
+(function () {{
   const w = window.parent;
   const doc = w.document;
-  const KEY = 'gatewai_chat_scroll_top';
-  let raw = null;
-  try { raw = w.sessionStorage.getItem(KEY); } catch (e) {}
-  if (raw === null || raw === '') return;
-  const y = parseInt(raw, 10);
-  if (isNaN(y)) return;
+  const KEY = '{_CHAT_SCROLL_LS}';
+  const FLAG = '__gatewaiChatScrollCapture';
 
-  function findChatPane() {
+  function findChatPane() {{
     const root = doc.querySelector('section.main') || doc;
     const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
     if (!msgs.length) return null;
     const last = msgs[msgs.length - 1];
     let el = last.parentElement;
-    while (el && el !== doc.body) {
+    while (el && el !== doc.body) {{
       if (el === doc.documentElement || el === doc.body) break;
       if (el.matches && (
         el.matches('section.main') ||
         el.matches('[data-testid="stAppViewContainer"]') ||
         el.matches('[data-testid="stAppScrollToBottomContainer"]') ||
         el.matches('[data-testid="stMain"]')
-      )) {
+      )) {{
         el = el.parentElement;
         continue;
-      }
+      }}
       if (el.scrollHeight > el.clientHeight + 8 && el.clientHeight > 40) return el;
       el = el.parentElement;
-    }
+    }}
     return null;
-  }
+  }}
 
-  function restore() {
+  function save() {{
     const pane = findChatPane();
     if (!pane) return;
-    try { pane.style.scrollBehavior = 'auto'; } catch (e) {}
+    try {{ w.sessionStorage.setItem(KEY, String(pane.scrollTop)); }} catch (e) {{}}
+  }}
+
+  if (!w[FLAG]) {{
+    w[FLAG] = true;
+    doc.addEventListener('scroll', function (ev) {{
+      const pane = findChatPane();
+      if (!pane) return;
+      if (ev.target === pane || (pane.contains && pane.contains(ev.target))) save();
+    }}, true);
+  }}
+  save();
+  setTimeout(save, 100);
+  setTimeout(save, 400);
+}})();
+</script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def restore_gatewai_chat_scroll_if_needed():
+    """Put the chat pane back where the user left it (slot toggle / sidebar)."""
+    if not st.session_state.pop("_restore_gatewai_chat_scroll", False):
+        return
+    components.html(
+        f"""
+<script>
+(function () {{
+  const w = window.parent;
+  const doc = w.document;
+  const KEY = '{_CHAT_SCROLL_LS}';
+  let raw = null;
+  try {{ raw = w.sessionStorage.getItem(KEY); }} catch (e) {{}}
+  if (raw === null || raw === '') return;
+  const y = parseInt(raw, 10);
+  if (isNaN(y)) return;
+
+  function findChatPane() {{
+    const root = doc.querySelector('section.main') || doc;
+    const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
+    if (!msgs.length) return null;
+    const last = msgs[msgs.length - 1];
+    let el = last.parentElement;
+    while (el && el !== doc.body) {{
+      if (el === doc.documentElement || el === doc.body) break;
+      if (el.matches && (
+        el.matches('section.main') ||
+        el.matches('[data-testid="stAppViewContainer"]') ||
+        el.matches('[data-testid="stAppScrollToBottomContainer"]') ||
+        el.matches('[data-testid="stMain"]')
+      )) {{
+        el = el.parentElement;
+        continue;
+      }}
+      if (el.scrollHeight > el.clientHeight + 8 && el.clientHeight > 40) return el;
+      el = el.parentElement;
+    }}
+    return null;
+  }}
+
+  function restore() {{
+    const pane = findChatPane();
+    if (!pane) return;
+    try {{ pane.style.scrollBehavior = 'auto'; }} catch (e) {{}}
     pane.scrollTop = y;
-  }
+  }}
   restore();
   requestAnimationFrame(restore);
-  [40, 120, 280, 600, 1200].forEach(function (ms) { setTimeout(restore, ms); });
-})();
+  [40, 120, 280, 600, 1200].forEach(function (ms) {{ setTimeout(restore, ms); }});
+}})();
 </script>
         """,
         height=0,
@@ -3269,9 +3345,9 @@ def save_open_slot(slot_name, content, summary="Manual save"):
         edit_summary=summary,
         folder=s_folder,
     )
-    # The editor already shows this text. Remounting it reruns the whole app and
-    # Streamlit then opens the chat tab.
-    commit_slot_text(slot_name, content, remount=False)
+    # Sync session + ACE seeds. Remount so the next Editor visit cannot resurrect
+    # a pre-save seed (radio keeps us on Editor; old st.tabs did not).
+    commit_slot_text(slot_name, content, remount=True)
 
 
 #def save_global_profile(text):
@@ -4300,6 +4376,13 @@ def commit_slot_text(slot_name, new_text, replaced_text=None, remount=True):
     st.session_state[_slot_committed_key(slot_name)] = new_text
     if prev is not None and normalize_harvest_text(prev) != normalize_harvest_text(new_text):
         st.session_state[_slot_replaced_key(slot_name)] = str(prev)
+    # Keep ACE seeds in lockstep — remounting Editor used to re-seed from the
+    # original mount value and overwrite the saved buffer with old text.
+    project = str(st.session_state.get("active_project", ""))
+    seed_prefix = f"_ace_seed_ace_editor_{project}::{slot_name}::"
+    for key in list(st.session_state.keys()):
+        if str(key).startswith(seed_prefix):
+            st.session_state[key] = new_text
     if remount:
         refresh_editor_widget(slot_name)
 
@@ -4426,13 +4509,24 @@ def render_live_editor(selected_file):
             return
         return
     st.session_state[selected_file] = typed
+    # Lock seed to the live buffer so leaving/revisiting Editor cannot re-seed
+    # ACE with the original mount value and wipe the typed/saved text.
+    st.session_state[seed_key] = typed
 
 @st.fragment
 def render_editor_save(selected_file):
     """Save without rerunning the app, so the Editor tab stays open."""
     project_name = st.session_state.active_project
     if st.button("💾 Save", key="editor_save_slot"):
-        content_to_save = st.session_state.get(selected_file, "")
+        # Seed tracks every keystroke; prefer it over a lagging slot buffer when
+        # only this Save fragment reruns.
+        editor_key = _ace_editor_key(selected_file)
+        seed_key = f"_ace_seed_{editor_key}"
+        if seed_key in st.session_state:
+            content_to_save = str(st.session_state[seed_key])
+        else:
+            content_to_save = str(st.session_state.get(selected_file, "") or "")
+        st.session_state[selected_file] = content_to_save
         _proj_db, _sys_db, _scope, slot_db = database_for_slot(selected_file)
         stored = read_stored_slot(slot_db, selected_file)
         if save_replaces_most(stored or "", content_to_save):
@@ -7729,6 +7823,7 @@ if main_view == _MAIN_GATEWAI:
         st.rerun()
 
     chat_container = render_project_chat(chat_pane_height(), "chat_earlier_main")
+    install_gatewai_chat_scroll_capture()
     restore_gatewai_chat_scroll_if_needed()
 
     _send_err = st.session_state.pop("chat_send_error", None)
