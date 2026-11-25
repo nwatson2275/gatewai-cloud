@@ -586,13 +586,12 @@ st.markdown(
             max-width: 100%;
         }
         /*
-          Memory rail = left-sidebar model: CSS owns position from first paint.
-          Never wait for JS class — that gap is the "ghost file list" in main
-          after Staging remounts. Only match the block that *directly* owns the
-          shell (not the main column that merely nests it).
+          Memory rail = left-sidebar model. Match the *innermost* vertical block
+          that contains the shell and does NOT contain main chrome (radio/chat).
+          Prior direct-child :has() never matched Streamlit's wrappers, so the
+          file list stayed in normal flow under Shadow Debugger.
         */
-        [data-testid="stVerticalBlock"]:has(> [data-testid="element-container"] .gatewai-rsb-shell),
-        [data-testid="stVerticalBlock"]:has(> div > [data-testid="element-container"] .gatewai-rsb-shell),
+        [data-testid="stVerticalBlock"]:has(.gatewai-rsb-shell):not(:has([data-testid="stVerticalBlock"] .gatewai-rsb-shell)):not(:has([data-testid="stRadio"])):not(:has([role="radiogroup"])):not(:has([data-testid="stChatMessage"])):not(:has([data-testid="stChatInput"])):not(:has(.ace_editor)),
         .gatewai-rsb-panel {
             position: fixed !important;
             top: 0 !important;
@@ -609,8 +608,7 @@ st.markdown(
             box-sizing: border-box !important;
             margin: 0 !important;
         }
-        html.gatewai-rsb-closed [data-testid="stVerticalBlock"]:has(> [data-testid="element-container"] .gatewai-rsb-shell),
-        html.gatewai-rsb-closed [data-testid="stVerticalBlock"]:has(> div > [data-testid="element-container"] .gatewai-rsb-shell),
+        html.gatewai-rsb-closed [data-testid="stVerticalBlock"]:has(.gatewai-rsb-shell):not(:has([data-testid="stVerticalBlock"] .gatewai-rsb-shell)):not(:has([data-testid="stRadio"])):not(:has([role="radiogroup"])):not(:has([data-testid="stChatMessage"])):not(:has([data-testid="stChatInput"])):not(:has(.ace_editor)),
         html.gatewai-rsb-closed .gatewai-rsb-panel,
         .gatewai-rsb-panel.gatewai-rsb-collapsed {
             width: 0 !important;
@@ -629,9 +627,8 @@ st.markdown(
         .gatewai-rsb-panel.gatewai-rsb-collapsed #gatewai-rsb-collapse-btn {
             display: none !important;
         }
-        /* Live Preview — same left-sidebar model (CSS-fixed from first paint). */
-        [data-testid="stVerticalBlock"]:has(> [data-testid="element-container"] .gatewai-lp-shell),
-        [data-testid="stVerticalBlock"]:has(> div > [data-testid="element-container"] .gatewai-lp-shell),
+        /* Live Preview — same innermost / exclude-main-chrome rule. */
+        [data-testid="stVerticalBlock"]:has(.gatewai-lp-shell):not(:has([data-testid="stVerticalBlock"] .gatewai-lp-shell)):not(:has([data-testid="stRadio"])):not(:has([role="radiogroup"])):not(:has([data-testid="stChatMessage"])):not(:has([data-testid="stChatInput"])):not(:has(.ace_editor)):not(:has(.gatewai-rsb-shell)),
         .gatewai-lp-panel {
             position: fixed !important;
             top: 0 !important;
@@ -648,8 +645,7 @@ st.markdown(
             box-sizing: border-box !important;
             margin: 0 !important;
         }
-        html.gatewai-lp-closed [data-testid="stVerticalBlock"]:has(> [data-testid="element-container"] .gatewai-lp-shell),
-        html.gatewai-lp-closed [data-testid="stVerticalBlock"]:has(> div > [data-testid="element-container"] .gatewai-lp-shell),
+        html.gatewai-lp-closed [data-testid="stVerticalBlock"]:has(.gatewai-lp-shell):not(:has([data-testid="stVerticalBlock"] .gatewai-lp-shell)):not(:has([data-testid="stRadio"])):not(:has([role="radiogroup"])):not(:has([data-testid="stChatMessage"])):not(:has([data-testid="stChatInput"])):not(:has(.ace_editor)):not(:has(.gatewai-rsb-shell)),
         html.gatewai-lp-closed .gatewai-lp-panel {
             width: 0 !important;
             min-width: 0 !important;
@@ -2379,7 +2375,7 @@ def install_right_sidebar_chrome(open_slots, width_px):
   const COOKIE = '{_RSB_WIDTH_COOKIE}';
   const OPEN_LS = '{_RSB_OPEN_LS}';
   const OPEN_COOKIE = '{_RSB_OPEN_COOKIE}';
-  const FLAG = '__gatewaiRightSidebarChromeV4';
+  const FLAG = '__gatewaiRightSidebarChromeV5';
 
   let open = {open_js};
   try {{
@@ -2423,32 +2419,23 @@ def install_right_sidebar_chrome(open_slots, width_px):
   }}
 
   function findPanel() {{
-    // Prefer a shell that is still inside main (fresh remount); else body-hosted.
-    const shells = Array.from(doc.querySelectorAll('.gatewai-rsb-shell'));
-    let shell = null;
-    for (let i = 0; i < shells.length; i++) {{
-      const s = shells[i];
-      if (s.closest('[data-testid="stMain"]') || s.closest('section.main')) {{
-        shell = s;
-        break;
-      }}
-    }}
-    if (!shell) shell = shells[shells.length - 1] || null;
+    const shell = doc.querySelector('.gatewai-rsb-shell');
     if (!shell) return null;
-    let el = shell.closest('[data-testid="stVerticalBlock"]');
-    if (!el) return shell.closest('[data-testid="element-container"]') || shell.parentElement;
-    while (el) {{
-      const parent = el.parentElement
-        && el.parentElement.closest('[data-testid="stVerticalBlock"]');
-      if (!parent || parent === el) break;
-      if (isMainChrome(parent)) break;
-      if (!parent.querySelector('.gatewai-rsb-shell')) break;
-      el = parent;
+    // Innermost vertical block with the shell that is NOT main chrome.
+    // Never fall back to the shell's element-container alone — that left the
+    // file list in normal flow under Shadow Debugger.
+    const blocks = [];
+    let node = shell.parentElement;
+    while (node && node !== doc.body) {{
+      if (node.matches && node.matches('[data-testid="stVerticalBlock"]')) {{
+        blocks.push(node);
+      }}
+      node = node.parentElement;
     }}
-    if (isMainChrome(el)) {{
-      return shell.closest('[data-testid="element-container"]') || shell.parentElement;
+    for (let i = 0; i < blocks.length; i++) {{
+      if (!isMainChrome(blocks[i])) return blocks[i];
     }}
-    return el;
+    return null;
   }}
 
   function makeChevronBtn(id, iconName, title, onClick) {{
@@ -2608,9 +2595,23 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }}
 
     panel.classList.add('gatewai-rsb-panel');
+    // Belt-and-suspenders: inline fixed so a missed CSS :has still cannot
+    // leave the file list under Shadow Debugger.
+    panel.style.setProperty('position', 'fixed', 'important');
+    panel.style.setProperty('top', '0', 'important');
+    panel.style.setProperty('right', '0', 'important');
+    panel.style.setProperty('height', '100vh', 'important');
+    panel.style.setProperty('z-index', '1000100', 'important');
+    panel.style.setProperty('background-color', '#f0f2f6', 'important');
+    panel.style.setProperty('box-sizing', 'border-box', 'important');
+    panel.style.setProperty('margin', '0', 'important');
     if (open) {{
       panel.classList.remove('gatewai-rsb-collapsed');
       panel.style.setProperty('width', px + 'px', 'important');
+      panel.style.setProperty('padding', '2.4rem 0.85rem 1.25rem 1rem', 'important');
+      panel.style.setProperty('border-left', '1px solid rgba(49, 51, 63, 0.2)', 'important');
+      panel.style.setProperty('overflow-x', 'hidden', 'important');
+      panel.style.setProperty('overflow-y', 'auto', 'important');
       panel.style.visibility = 'visible';
       panel.style.pointerEvents = 'auto';
       panel.style.opacity = '1';
@@ -2619,6 +2620,9 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }} else {{
       panel.classList.add('gatewai-rsb-collapsed');
       panel.style.setProperty('width', '0px', 'important');
+      panel.style.setProperty('padding', '0', 'important');
+      panel.style.setProperty('border', 'none', 'important');
+      panel.style.setProperty('overflow', 'hidden', 'important');
       panel.style.visibility = 'hidden';
       panel.style.pointerEvents = 'none';
       panel.style.opacity = '0';
@@ -2679,12 +2683,22 @@ def install_right_sidebar_chrome(open_slots, width_px):
 
 
 def render_app_memory_sidebar():
-    """App-level Memory sidebar — always mounted on desktop; JS collapses width only."""
+    """App-level Memory sidebar — always mounted on desktop; JS collapses width only.
+
+    Double container so Streamlit always nests a vertical block that is NOT the
+    main column (CSS/JS target the innermost block with the shell marker).
+    """
     with st.container():
-        st.markdown('<div class="gatewai-rsb-shell" aria-hidden="true"></div>', unsafe_allow_html=True)
-        st.markdown("### 📂 Memory")
-        st.caption("Tap 🟢/⚪ to include or hide a slot in chat context. Drag the left border to resize.")
-        render_memory_slot_sidebar("memory", height=None, show_meta=True)
+        with st.container():
+            st.markdown(
+                '<div class="gatewai-rsb-shell" data-gatewai-rsb="1" aria-hidden="true"></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("### 📂 Memory")
+            st.caption(
+                "Tap 🟢/⚪ to include or hide a slot in chat context. Drag the left border to resize."
+            )
+            render_memory_slot_sidebar("memory", height=None, show_meta=True)
 
 
 _LP_WIDTH_COOKIE = "gatewai_lp_width"
