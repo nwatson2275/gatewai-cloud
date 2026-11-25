@@ -1302,8 +1302,9 @@ def render_memory_slot_sidebar(key_prefix, height=480, show_meta=True):
                 st.session_state.selected_file = fname
                 st.session_state["expanded_slot"] = fname
                 # Live Preview off → open the slot in Editor. Preview on → stay on GateWai.
+                # Can't write main_view_selector after the radio exists — queue for next run.
                 if not st.session_state.get("show_preview"):
-                    st.session_state.main_view_selector = "📝 Editor"
+                    st.session_state._pending_main_view = "📝 Editor"
                 st.rerun()
         with active_col:
             if fname in core_files:
@@ -7402,6 +7403,11 @@ _rsb_width = memory_slots_width_px()
 _mobile_shell = is_mobile_client()
 # Desktop: keep the pane in the DOM always; JS only collapses its width.
 _use_app_rsb = not _mobile_shell
+
+# Apply queued view switches BEFORE the radio widget is created.
+_pending_view = st.session_state.pop("_pending_main_view", None)
+if _pending_view in (_MAIN_GATEWAI, _MAIN_EDITOR):
+    st.session_state.main_view_selector = _pending_view
 
 main_view = st.radio(
     "Main view",
