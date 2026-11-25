@@ -2035,6 +2035,8 @@ ENGINE_ROOM_FIELDS = (
 
 _RSB_WIDTH_COOKIE = "gatewai_rsb_width"
 _RSB_WIDTH_LS = "gatewai_rsb_width"
+_RSB_OPEN_COOKIE = "gatewai_rsb_open"
+_RSB_OPEN_LS = "gatewai_rsb_open"
 _RSB_DEFAULT_WIDTH_PX = 320
 _RSB_MIN_WIDTH_PX = 220
 _RSB_MAX_WIDTH_PX = 560
@@ -2062,6 +2064,25 @@ def read_rsb_width_cookie():
         if raw is None or str(raw).strip() == "":
             return None
         return _clamp_rsb_width_px(raw)
+    except Exception:
+        return None
+
+
+def read_rsb_open_cookie():
+    """Open/closed last set by the client-side chevron (no Streamlit remount)."""
+    try:
+        cookies = getattr(st.context, "cookies", None)
+        if cookies is None or not hasattr(cookies, "get"):
+            return None
+        raw = cookies.get(_RSB_OPEN_COOKIE)
+        if raw is None:
+            return None
+        raw = str(raw).strip().lower()
+        if raw in ("1", "true", "yes", "on"):
+            return True
+        if raw in ("0", "false", "no", "off"):
+            return False
+        return None
     except Exception:
         return None
 
@@ -2182,11 +2203,10 @@ def memory_slots_width_px():
 
 
 def install_right_sidebar_chrome(open_slots, width_px):
-    """Fix Memory panel to the viewport right, push the whole app, drag-resize border.
+    """Fix Memory panel to the viewport right — collapse/expand like Streamlit's left sidebar.
 
-    Mirrors Streamlit's left sidebar: grey full-height pane, independent scroll,
-    border drag to expand/collapse width. Open/closed still driven by Streamlit
-    session state (<< button / >> tab).
+    Open/close is CSS + localStorage only (no Streamlit remount), so GateWai chat
+    keeps its scroll position the same way the left sidebar does.
     """
     open_js = "true" if open_slots else "false"
     width_px = int(_clamp_rsb_width_px(width_px))
@@ -2196,15 +2216,29 @@ def install_right_sidebar_chrome(open_slots, width_px):
 (function () {{
   const w = window.parent;
   const doc = w.document;
-  const OPEN = {open_js};
   const WIDTH = {width_px};
   const MIN_W = {_RSB_MIN_WIDTH_PX};
   const MAX_W = {_RSB_MAX_WIDTH_PX};
   const LS_KEY = '{_RSB_WIDTH_LS}';
   const COOKIE = '{_RSB_WIDTH_COOKIE}';
-  const FLAG = '__gatewaiRightSidebarChrome';
+  const OPEN_LS = '{_RSB_OPEN_LS}';
+  const OPEN_COOKIE = '{_RSB_OPEN_COOKIE}';
+  const FLAG = '__gatewaiRightSidebarChromeV3';
 
-  function setCookie(px) {{
+  // Client-owned open state (mirrors Streamlit left sidebar — no Python rerun).
+  let open = {open_js};
+  try {{
+    const saved = w.localStorage.getItem(OPEN_LS);
+    if (saved === '0' || saved === '1') open = (saved === '1');
+  }} catch (e) {{}}
+
+  let widthPx = WIDTH;
+  try {{
+    const ls = parseInt(w.localStorage.getItem(LS_KEY) || '', 10);
+    if (ls) widthPx = Math.max(MIN_W, Math.min(MAX_W, ls));
+  }} catch (e) {{}}
+
+  function setWidthCookie(px) {{
     try {{
       const secure = w.location.protocol === 'https:' ? '; Secure' : '';
       doc.cookie = COOKIE + '=' + encodeURIComponent(String(px))
@@ -2213,14 +2247,16 @@ def install_right_sidebar_chrome(open_slots, width_px):
     try {{ w.localStorage.setItem(LS_KEY, String(px)); }} catch (e) {{}}
   }}
 
-  function applyWidth(px) {{
-    px = Math.max(MIN_W, Math.min(MAX_W, Math.round(px)));
-    doc.documentElement.style.setProperty('--gatewai-rsb-width', OPEN ? (px + 'px') : '0px');
-    return px;
+  function setOpenCookie(isOpen) {{
+    try {{
+      const secure = w.location.protocol === 'https:' ? '; Secure' : '';
+      doc.cookie = OPEN_COOKIE + '=' + (isOpen ? '1' : '0')
+        + '; path=/; max-age=31536000; SameSite=Lax' + secure;
+    }} catch (e) {{}}
+    try {{ w.localStorage.setItem(OPEN_LS, isOpen ? '1' : '0'); }} catch (e) {{}}
   }}
 
   function isMainChrome(node) {{
-    // Never treat the GateWai/Editor column as the Memory pane — that emptied the middle.
     if (!node || !node.querySelector) return true;
     if (node.querySelector('[data-testid="stChatMessage"]')) return true;
     if (node.querySelector('[data-testid="stChatInput"]')) return true;
@@ -2234,7 +2270,6 @@ def install_right_sidebar_chrome(open_slots, width_px):
   function findPanel() {{
     const shell = doc.querySelector('.gatewai-rsb-shell');
     if (!shell) return null;
-    // Prefer the dedicated st.container block around the Memory sidebar only.
     let el = shell.closest('[data-testid="stVerticalBlock"]');
     if (!el) return shell.closest('[data-testid="element-container"]') || shell.parentElement;
     while (el) {{
@@ -2257,72 +2292,6 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }});
   }}
 
-  function isDecoyChevron(btn) {{
-    if (!btn || btn.classList.contains('gatewai-rsb-chevron-btn')) return false;
-    const t = (btn.innerText || '').trim();
-    return t === '<<' || t === '>>';
-  }}
-
-  function hideDecoyChevrons() {{
-    // Streamlit does not nest widgets inside our markdown wrappers, so the decoy
-    // << / >> buttons otherwise sit in the main column under GateWai/Editor.
-    Array.from(doc.querySelectorAll('button')).forEach(function (b) {{
-      if (!isDecoyChevron(b)) return;
-      const wrap = b.closest('[data-testid="stButton"]')
-        || b.closest('[data-testid="element-container"]')
-        || b.parentElement;
-      if (wrap) {{
-        wrap.style.display = 'none';
-        wrap.style.height = '0';
-        wrap.style.margin = '0';
-        wrap.style.padding = '0';
-        wrap.style.overflow = 'hidden';
-      }}
-      b.style.display = 'none';
-    }});
-  }}
-
-  function findChatPane() {{
-    const root = doc.querySelector('section.main') || doc;
-    const msgs = root.querySelectorAll('[data-testid="stChatMessage"]');
-    if (!msgs.length) return null;
-    const last = msgs[msgs.length - 1];
-    let el = last.parentElement;
-    while (el && el !== doc.body) {{
-      if (el === doc.documentElement || el === doc.body) break;
-      if (el.matches && (
-        el.matches('section.main') ||
-        el.matches('[data-testid="stAppViewContainer"]') ||
-        el.matches('[data-testid="stAppScrollToBottomContainer"]') ||
-        el.matches('[data-testid="stMain"]')
-      )) {{
-        el = el.parentElement;
-        continue;
-      }}
-      if (el.scrollHeight > el.clientHeight + 8 && el.clientHeight > 40) return el;
-      el = el.parentElement;
-    }}
-    return null;
-  }}
-
-  function saveChatScroll() {{
-    const pane = findChatPane();
-    if (!pane) return;
-    try {{ w.sessionStorage.setItem('gatewai_chat_scroll_top', String(pane.scrollTop)); }} catch (e) {{}}
-  }}
-
-  function clickStreamlitTarget(kind) {{
-    // Capture chat scroll before the Streamlit remount (left sidebar doesn't remount chat).
-    saveChatScroll();
-    const want = kind === 'collapse' ? '<<' : '>>';
-    const btn = Array.from(doc.querySelectorAll('button'))
-      .find(b => isDecoyChevron(b) && (b.innerText || '').trim() === want);
-    if (btn) {{
-      btn.style.display = '';
-      btn.click();
-    }}
-  }}
-
   function makeChevronBtn(id, iconName, title, onClick) {{
     let btn = doc.getElementById(id);
     if (!btn) {{
@@ -2333,6 +2302,8 @@ def install_right_sidebar_chrome(open_slots, width_px):
       btn.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">'
         + iconName + '</span>';
       btn.addEventListener('click', onClick);
+    }} else {{
+      btn.onclick = onClick;
     }}
     btn.title = title;
     btn.setAttribute('aria-label', title);
@@ -2340,7 +2311,6 @@ def install_right_sidebar_chrome(open_slots, width_px):
   }}
 
   function alignExpandWithLeftHeader(btn) {{
-    // Match the left sidebar expand/collapse vertical position exactly.
     const leftBtn = doc.querySelector('[data-testid="stExpandSidebarButton"]')
       || doc.querySelector('[data-testid="stSidebarCollapseButton"] button')
       || doc.querySelector('[data-testid="stSidebarCollapseButton"]')
@@ -2367,6 +2337,7 @@ def install_right_sidebar_chrome(open_slots, width_px):
     if (handle.dataset.bound === '1') return;
     handle.dataset.bound = '1';
     handle.addEventListener('mousedown', function (ev) {{
+      if (!open) return;
       ev.preventDefault();
       _dragging = true;
       handle.classList.add('dragging');
@@ -2375,8 +2346,9 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }});
     doc.addEventListener('mousemove', function (ev) {{
       if (!_dragging) return;
-      const px = applyWidth(w.innerWidth - ev.clientX);
-      panel.style.width = px + 'px';
+      widthPx = Math.max(MIN_W, Math.min(MAX_W, Math.round(w.innerWidth - ev.clientX)));
+      doc.documentElement.style.setProperty('--gatewai-rsb-width', widthPx + 'px');
+      panel.style.width = widthPx + 'px';
     }});
     doc.addEventListener('mouseup', function () {{
       if (!_dragging) return;
@@ -2384,74 +2356,82 @@ def install_right_sidebar_chrome(open_slots, width_px):
       handle.classList.remove('dragging');
       doc.body.style.cursor = '';
       doc.body.style.userSelect = '';
-      const raw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-rsb-width');
-      const px = parseInt(raw, 10) || WIDTH;
-      setCookie(px);
+      setWidthCookie(widthPx);
     }});
   }}
 
+  function setOpen(next) {{
+    open = !!next;
+    setOpenCookie(open);
+    applyLayout();
+  }}
+
   function ensureCollapseBtn(panel) {{
-    // keyboard_double_arrow_right — collapse toward the right (mirror of left sidebar's left arrows).
     const btn = makeChevronBtn(
       'gatewai-rsb-collapse-btn',
       'keyboard_double_arrow_right',
       'Collapse Memory slots sidebar',
-      function () {{ clickStreamlitTarget('collapse'); }}
+      function (ev) {{
+        ev.preventDefault();
+        ev.stopPropagation();
+        setOpen(false);
+      }}
     );
     if (btn.parentElement !== panel) panel.appendChild(btn);
+    btn.style.display = open ? '' : 'none';
   }}
 
   function ensureExpandBtn() {{
-    // Remove mid-screen edge tab if an older build left one around.
     const legacy = doc.getElementById('gatewai-rsb-edge-tab');
     if (legacy) legacy.remove();
-
     let btn = doc.getElementById('gatewai-rsb-expand-btn');
-    if (OPEN) {{
+    if (open) {{
       if (btn) btn.remove();
       return;
     }}
-    // keyboard_double_arrow_left — expand from the right (mirror of left sidebar's right arrows).
     btn = makeChevronBtn(
       'gatewai-rsb-expand-btn',
       'keyboard_double_arrow_left',
       'Expand Memory slots sidebar',
-      function () {{ clickStreamlitTarget('expand'); }}
+      function (ev) {{
+        ev.preventDefault();
+        ev.stopPropagation();
+        setOpen(true);
+      }}
     );
     if (btn.parentElement !== doc.body) doc.body.appendChild(btn);
     alignExpandWithLeftHeader(btn);
   }}
 
-  function mount() {{
-    if (_dragging) return;
-    hideDecoyChevrons();
+  function applyLayout() {{
     scrubMisappliedPanels();
-    // Prefer last dragged width from localStorage over the Python snapshot.
-    let startW = WIDTH;
-    try {{
-      const ls = parseInt(w.localStorage.getItem(LS_KEY) || '', 10);
-      if (ls) startW = Math.max(MIN_W, Math.min(MAX_W, ls));
-    }} catch (e) {{}}
-    applyWidth(startW);
+    const px = open ? widthPx : 0;
+    doc.documentElement.style.setProperty('--gatewai-rsb-width', px + 'px');
     const panel = findPanel();
-    if (OPEN && panel && !isMainChrome(panel)) {{
-      panel.classList.add('gatewai-rsb-panel');
-      ensureDrag(panel);
-      ensureCollapseBtn(panel);
-    }} else {{
-      if (panel) panel.classList.remove('gatewai-rsb-panel');
+    if (!panel || isMainChrome(panel)) {{
+      doc.documentElement.style.setProperty('--gatewai-rsb-width', '0px');
       const c = doc.getElementById('gatewai-rsb-collapse-btn');
       if (c) c.remove();
-      if (OPEN && (!panel || isMainChrome(panel))) {{
-        // Fail safe: don't leave the app pushed aside with no real pane.
-        doc.documentElement.style.setProperty('--gatewai-rsb-width', '0px');
-      }}
+      ensureExpandBtn();
+      return;
     }}
+    // Keep the pane mounted (like st.sidebar) — only the width collapses.
+    panel.classList.add('gatewai-rsb-panel');
+    panel.style.width = px + 'px';
+    panel.style.visibility = open ? 'visible' : 'hidden';
+    panel.style.pointerEvents = open ? 'auto' : 'none';
+    ensureDrag(panel);
+    ensureCollapseBtn(panel);
     ensureExpandBtn();
   }}
 
-  // Always point at the latest mount (OPEN/WIDTH change every Streamlit rerun).
+  function mount() {{
+    if (_dragging) return;
+    applyLayout();
+  }}
+
   w.__gatewaiRsbMount = mount;
+  w.__gatewaiRsbSetOpen = setOpen;
   function mountSoon() {{
     if (w.__gatewaiRsbTimer) clearTimeout(w.__gatewaiRsbTimer);
     w.__gatewaiRsbTimer = setTimeout(function () {{
@@ -2459,8 +2439,8 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }}, 50);
   }}
   mount();
-  setTimeout(function () {{ if (w.__gatewaiRsbMount) w.__gatewaiRsbMount(); }}, 120);
-  setTimeout(function () {{ if (w.__gatewaiRsbMount) w.__gatewaiRsbMount(); }}, 500);
+  setTimeout(mount, 120);
+  setTimeout(mount, 500);
   if (!w[FLAG]) {{
     w[FLAG] = true;
     try {{
@@ -2480,20 +2460,11 @@ def install_right_sidebar_chrome(open_slots, width_px):
 
 
 def render_app_memory_sidebar():
-    """App-level Memory sidebar content (fixed to the right by install_right_sidebar_chrome)."""
-    # One nested block so JS can pin the whole sidebar without grabbing GateWai/Editor.
+    """App-level Memory sidebar — always mounted on desktop; JS collapses width only."""
     with st.container():
         st.markdown('<div class="gatewai-rsb-shell" aria-hidden="true"></div>', unsafe_allow_html=True)
-        # Hidden Streamlit target — the visible control is the mirrored chevron in the pane header.
-        st.markdown('<div class="gatewai-rsb-collapse-target">', unsafe_allow_html=True)
-        if st.button("<<", key="memory_slots_collapse_btn", help="Collapse Memory slots sidebar"):
-            set_memory_slots_open(False)
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
         st.markdown("### 📂 Memory")
         st.caption("Tap 🟢/⚪ to include or hide a slot in chat context. Drag the left border to resize.")
-        # Panel itself scrolls like the left sidebar — no nested height box needed.
         render_memory_slot_sidebar("memory", height=None, show_meta=True)
 
 
@@ -7418,15 +7389,19 @@ _MAIN_EDITOR = "📝 Editor"
 if "main_view_selector" not in st.session_state:
     st.session_state.main_view_selector = _MAIN_GATEWAI
 
-# App-level Memory sidebar (symmetrical to st.sidebar): open/closed + width.
+# App-level Memory sidebar (symmetrical to st.sidebar): always mounted on desktop.
+# Open/close is client-side CSS (like the left sidebar) — no remount / no chat jump.
 if "show_memory_slots_pref" not in st.session_state:
     st.session_state.show_memory_slots_pref = False
+_cookie_open = read_rsb_open_cookie()
+if _cookie_open is not None:
+    st.session_state.show_memory_slots_pref = _cookie_open
 _show_slots = bool(st.session_state.show_memory_slots_pref)
 st.session_state.show_memory_slots = _show_slots
 _rsb_width = memory_slots_width_px()
 _mobile_shell = is_mobile_client()
-# Desktop: fixed right pane pushes the whole app. Mobile: expander inside the view.
-_use_app_rsb = _show_slots and not _mobile_shell
+# Desktop: keep the pane in the DOM always; JS only collapses its width.
+_use_app_rsb = not _mobile_shell
 
 main_view = st.radio(
     "Main view",
@@ -7436,17 +7411,9 @@ main_view = st.radio(
     label_visibility="collapsed",
 )
 
-# Hidden expand target for the fixed >> edge tab (and a visible fallback on mobile).
-if not _show_slots:
-    st.markdown('<div class="gatewai-rsb-expand">', unsafe_allow_html=True)
-    if st.button(">>", key="memory_slots_expand_btn", help="Expand Memory slots sidebar"):
-        set_memory_slots_open(True)
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
-
 if _use_app_rsb:
     render_app_memory_sidebar()
-install_right_sidebar_chrome(_use_app_rsb, _rsb_width)
+install_right_sidebar_chrome(_show_slots if _use_app_rsb else False, _rsb_width)
 
 # =========================================================
 # VIEW 1: GateWai (Chat & Artifacts)
