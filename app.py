@@ -1930,7 +1930,7 @@ ENGINE_ROOM_FIELDS = (
 
 
 def persist_ui_layout_prefs(project_name=None):
-    """Write GateWai/Editor layout toggles into config.json (survive refresh)."""
+    """Write the shared Memory-slots right rail into config.json (survive refresh)."""
     project_name = project_name or st.session_state.get("active_project") or ""
     if not project_name:
         return
@@ -1938,12 +1938,16 @@ def persist_ui_layout_prefs(project_name=None):
     existing, unreadable = read_project_config(project_name)
     if unreadable:
         return
-    existing["gatewai_show_slots"] = bool(
-        st.session_state.get("gatewai_show_slots_pref", st.session_state.get("gatewai_show_slots", False))
+    open_slots = bool(
+        st.session_state.get(
+            "show_memory_slots_pref",
+            st.session_state.get("show_memory_slots", False),
+        )
     )
-    existing["show_file_list"] = bool(
-        st.session_state.get("show_file_list_pref", st.session_state.get("show_file_list", False))
-    )
+    # One shared rail for GateWai + Editor; keep legacy keys in sync for old clients.
+    existing["show_memory_slots"] = open_slots
+    existing["gatewai_show_slots"] = open_slots
+    existing["show_file_list"] = open_slots
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(existing, f, indent=4)
@@ -1953,15 +1957,18 @@ def persist_ui_layout_prefs(project_name=None):
         print(f"ERROR: persist_ui_layout_prefs failed: {e}")
 
 
-def remember_gatewai_slots_pref():
-    """Keep Memory-slots open/closed across remounts and leaving the GateWai view.
-
-    Streamlit drops widget keys that aren't rendered; switching to Editor (or a
-    post-reply remount race) was clearing the checkbox back to off.
-    """
-    if "gatewai_show_slots" in st.session_state:
-        st.session_state.gatewai_show_slots_pref = bool(st.session_state.gatewai_show_slots)
+def remember_memory_slots_pref():
+    """Keep the right Memory-slots rail open/closed across GateWai ↔ Editor."""
+    if "show_memory_slots" in st.session_state:
+        st.session_state.show_memory_slots_pref = bool(st.session_state.show_memory_slots)
         persist_ui_layout_prefs()
+
+
+def render_memory_slots_rail(height=520, show_meta=True):
+    """Right-rail Memory slots panel (shared by GateWai and Editor)."""
+    st.markdown("### 📂 Memory")
+    st.caption("Tap 🟢/⚪ to include or hide a slot in chat context.")
+    render_memory_slot_sidebar("memory", height=height, show_meta=show_meta)
 
 def engine_room_widget_key(canonical, project=None):
     project = project if project is not None else st.session_state.get("active_project", "")
@@ -2107,11 +2114,15 @@ def save_project_state(state, name, silent=False):
                 "last_harvest_message_index": saved_config_value("last_harvest_message_index", "last_harvest_message_index", 0),
                 "review_mode_active": saved_config_value("review_mode_active", "review_mode_active", True),
                 "auto_shadow_active": saved_config_value("auto_shadow_active", "auto_shadow_active", True),
+                "show_memory_slots": saved_config_value(
+                    "show_memory_slots_pref", "show_memory_slots", False
+                ),
+                # Legacy aliases — same shared rail.
                 "gatewai_show_slots": saved_config_value(
-                    "gatewai_show_slots_pref", "gatewai_show_slots", False
+                    "show_memory_slots_pref", "show_memory_slots", False
                 ),
                 "show_file_list": saved_config_value(
-                    "show_file_list_pref", "show_file_list", False
+                    "show_memory_slots_pref", "show_memory_slots", False
                 ),
             }
             with open(config_path, "w", encoding="utf-8") as f:
@@ -4130,11 +4141,15 @@ if st.session_state.loaded_project != st.session_state.active_project:
         st.session_state[f"auto_shadow_toggle::{st.session_state.active_project}"] = bool(
             st.session_state.auto_shadow_active
         )
-        # Layout prefs — restore into durable prefs + widget keys
-        st.session_state.gatewai_show_slots_pref = bool(cfg.get("gatewai_show_slots", False))
-        st.session_state.gatewai_show_slots = st.session_state.gatewai_show_slots_pref
-        st.session_state.show_file_list_pref = bool(cfg.get("show_file_list", False))
-        st.session_state.show_file_list = st.session_state.show_file_list_pref
+        # Shared right Memory-slots rail (migrate older per-tab prefs).
+        _slots_open = bool(
+            cfg.get(
+                "show_memory_slots",
+                cfg.get("gatewai_show_slots", cfg.get("show_file_list", False)),
+            )
+        )
+        st.session_state.show_memory_slots_pref = _slots_open
+        st.session_state.show_memory_slots = _slots_open
          # --- DEBUG: Print session state after loading ---
 #        print(f"DEBUG LOAD_PROJECT_STATE: st.session_state.last_harvest_message_index set to {st.session_state.last_harvest_message_index}")
     else:
@@ -6606,13 +6621,31 @@ _MAIN_GATEWAI = "💬 GateWai"
 _MAIN_EDITOR = "📝 Editor"
 if "main_view_selector" not in st.session_state:
     st.session_state.main_view_selector = _MAIN_GATEWAI
-main_view = st.radio(
-    "Main view",
-    [_MAIN_GATEWAI, _MAIN_EDITOR],
-    horizontal=True,
-    key="main_view_selector",
-    label_visibility="collapsed",
-)
+
+# Shared Memory-slots toggle lives ABOVE both views so it stays mounted when
+# switching GateWai ↔ Editor (Streamlit drops unused widget keys otherwise).
+if "show_memory_slots_pref" not in st.session_state:
+    st.session_state.show_memory_slots_pref = False
+if "show_memory_slots" not in st.session_state:
+    st.session_state.show_memory_slots = bool(st.session_state.show_memory_slots_pref)
+_view_toggle, _slots_toggle = st.columns([3, 1])
+with _view_toggle:
+    main_view = st.radio(
+        "Main view",
+        [_MAIN_GATEWAI, _MAIN_EDITOR],
+        horizontal=True,
+        key="main_view_selector",
+        label_visibility="collapsed",
+    )
+with _slots_toggle:
+    st.checkbox(
+        "📂 Memory slots",
+        key="show_memory_slots",
+        help="Show the memory-slot list as a right sidebar on GateWai and Editor.",
+        on_change=remember_memory_slots_pref,
+    )
+st.session_state.show_memory_slots_pref = bool(st.session_state.show_memory_slots)
+_show_slots = bool(st.session_state.show_memory_slots_pref)
 
 # =========================================================
 # VIEW 1: GateWai (Chat & Artifacts)
@@ -6626,20 +6659,6 @@ if main_view == _MAIN_GATEWAI:
         st.session_state.get("prompt_submit_in_flight")
     ) or bool(_pending_now_prompt) or bool(st.session_state.get("pending_updates"))
     _mobile = is_mobile_client()
-    # Restore checkbox from durable pref when Streamlit dropped the widget key
-    # (happens when Editor was showing, or after some remounts).
-    if "gatewai_show_slots_pref" not in st.session_state:
-        st.session_state.gatewai_show_slots_pref = False
-    if "gatewai_show_slots" not in st.session_state:
-        st.session_state.gatewai_show_slots = bool(st.session_state.gatewai_show_slots_pref)
-    st.checkbox(
-        "📂 Memory slots",
-        key="gatewai_show_slots",
-        help="Show the memory-slot list beside chat so you can include/exclude files without leaving GateWai.",
-        on_change=remember_gatewai_slots_pref,
-    )
-    st.session_state.gatewai_show_slots_pref = bool(st.session_state.gatewai_show_slots)
-    _show_slots = bool(st.session_state.gatewai_show_slots_pref)
     # Desktop right sidebar; on mobile / busy turns use an expander under chat instead.
     _use_slots_split = _show_slots and not _mobile and not _turn_busy
     # Never split chat/preview on phones — two columns + staging unglues the page.
@@ -6684,7 +6703,7 @@ if main_view == _MAIN_GATEWAI:
         # Mobile / busy: slot list under chat (not a second column that unglues layout).
         if _show_slots and col_slots is None:
             with st.expander("📂 Memory slots", expanded=True):
-                render_memory_slot_sidebar("gatewai", height=280, show_meta=False)
+                render_memory_slot_sidebar("memory", height=280, show_meta=False)
 
         # Collapsed by default — an open debugger after submit was blowing mobile layout
         # and stealing scroll away from the chat pane.
@@ -6712,9 +6731,7 @@ if main_view == _MAIN_GATEWAI:
 
     if col_slots is not None:
         with col_slots:
-            st.markdown("### 📂 Memory")
-            st.caption("Tap 🟢/⚪ to include or hide a slot in chat context.")
-            render_memory_slot_sidebar("gatewai", height=520, show_meta=True)
+            render_memory_slots_rail(height=520, show_meta=True)
 
 
 #    print("after with col_chat") # <-- ADD THIS LINE
@@ -6791,39 +6808,22 @@ if main_view == _MAIN_GATEWAI:
 # =========================================================
 else:
     pin_editor_tab_to_top()
-    # Keyed checkbox + durable pref (widget key is dropped when Editor isn't mounted).
-    if "show_file_list_pref" not in st.session_state:
-        st.session_state.show_file_list_pref = False
-    if "show_file_list" not in st.session_state:
-        st.session_state.show_file_list = bool(st.session_state.show_file_list_pref)
-
-    def _remember_show_file_list():
-        st.session_state.show_file_list_pref = bool(st.session_state.get("show_file_list", False))
-        persist_ui_layout_prefs()
-
-    show_file_list = st.checkbox(
-        "📂 Show File List",
-        key="show_file_list",
-        help="Toggle visibility of the file list to maximize editor space.",
-        on_change=_remember_show_file_list,
-    )
-    st.session_state.show_file_list_pref = bool(show_file_list)
-
-    if show_file_list:
-        col_file_list, col_editor = st.columns([2, 3])
+    # Same shared Memory-slots rail as GateWai (right side when open).
+    _mobile_ed = is_mobile_client()
+    _use_editor_slots = _show_slots and not _mobile_ed
+    if _use_editor_slots:
+        col_editor, col_slots = st.columns([3, 1])
     else:
-        col_file_list = None
         col_editor = st.container()
+        col_slots = None
 
     if "selected_file" not in st.session_state:
         st.session_state.selected_file = CORE_SCHEMA.get("summary.txt", "")
-    if show_file_list:
-        with col_file_list:
-            st.markdown("### 📂 Files")
-            render_memory_slot_sidebar("editor", height=480, show_meta=True)
-            selected_file = st.session_state.selected_file
-    else:
-        selected_file = st.session_state.get("selected_file", CORE_SCHEMA.get("summary.txt", ""))
+    selected_file = st.session_state.get("selected_file", CORE_SCHEMA.get("summary.txt", ""))
+
+    if col_slots is not None:
+        with col_slots:
+            render_memory_slots_rail(height=520, show_meta=True)
 
     with col_editor:
         st.subheader(f"✏️ {st.session_state.active_project}  ·  {selected_file}")
@@ -7167,6 +7167,11 @@ else:
             except Exception as e:
                 st.error(f"Error reading file: {e}")
             pass
+
+    # Mobile: Memory slots under the editor (same shared rail as GateWai).
+    if _show_slots and col_slots is None:
+        with st.expander("📂 Memory slots", expanded=True):
+            render_memory_slot_sidebar("memory", height=280, show_meta=False)
 
 # --- 9. CHAT + AUTO-SHADOW (AFTER both tabs so Editor always mounts before the API call) ---
 # After Submit we remount once, then run the model on this following pass.
