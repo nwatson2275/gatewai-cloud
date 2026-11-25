@@ -563,21 +563,37 @@ st.markdown(
             --gatewai-lp-width: 0px;
             --gatewai-right-chrome: calc(var(--gatewai-lp-width) + var(--gatewai-rsb-width));
         }
-        /* Reserve viewport strip for the fixed right panes so chat/messages aren't covered. */
+        /*
+          Streamlit's main/bottom panes are often position:absolute with right:0, so
+          padding on .stApp is ignored and content paints under the fixed right chrome.
+          Explicitly inset those panes by --gatewai-right-chrome.
+        */
         .stApp {
-            padding-right: var(--gatewai-right-chrome) !important;
             box-sizing: border-box !important;
-            transition: padding-right 0.12s ease;
+            overflow-x: hidden !important;
         }
-        [data-testid="stAppViewContainer"],
-        [data-testid="stAppScrollToBottomContainer"],
+        [data-testid="stAppViewContainer"] {
+            width: calc(100vw - var(--gatewai-right-chrome)) !important;
+            max-width: calc(100vw - var(--gatewai-right-chrome)) !important;
+            box-sizing: border-box !important;
+            overflow-x: hidden !important;
+            transition: width 0.12s ease, max-width 0.12s ease;
+        }
         [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        section.main,
+        [data-testid="stMain"],
         [data-testid="stBottom"],
         [data-testid="stBottomBlockContainer"],
+        [data-testid="stAppScrollToBottomContainer"] {
+            right: var(--gatewai-right-chrome) !important;
+            max-width: calc(100vw - var(--gatewai-right-chrome)) !important;
+            box-sizing: border-box !important;
+            overflow-x: hidden !important;
+        }
         section.main,
         [data-testid="stMain"] {
-            max-width: 100% !important;
-            box-sizing: border-box !important;
+            width: auto !important;
         }
         /* Chat bubbles / long lines must wrap inside the shortened main column. */
         section.main [data-testid="stChatMessage"],
@@ -588,7 +604,9 @@ st.markdown(
         }
         section.main .block-container {
             max-width: 100% !important;
+            width: 100% !important;
             padding-right: 0.75rem !important;
+            box-sizing: border-box !important;
         }
         .gatewai-rsb-panel {
             position: fixed !important;
@@ -2390,6 +2408,37 @@ def install_right_sidebar_chrome(open_slots, width_px):
     applyLayout();
   }}
 
+  function rightChromePx() {{
+    const lpRaw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-lp-width');
+    const lp = parseInt(lpRaw, 10);
+    return (open ? widthPx : 0) + (isNaN(lp) ? 0 : lp);
+  }}
+
+  function insetMainFromRightChrome() {{
+    // Reinforce CSS against Streamlit emotion absolute right:0 layouts.
+    const total = rightChromePx();
+    doc.documentElement.style.setProperty('--gatewai-right-chrome', total + 'px');
+    const sel = [
+      '[data-testid="stAppViewContainer"]',
+      '[data-testid="stHeader"]',
+      '[data-testid="stToolbar"]',
+      'section.main',
+      '[data-testid="stMain"]',
+      '[data-testid="stBottom"]',
+      '[data-testid="stBottomBlockContainer"]',
+      '[data-testid="stAppScrollToBottomContainer"]'
+    ];
+    sel.forEach(function (s) {{
+      Array.from(doc.querySelectorAll(s)).forEach(function (el) {{
+        el.style.setProperty('right', total + 'px', 'important');
+        el.style.setProperty('max-width', 'calc(100vw - ' + total + 'px)', 'important');
+        if (s === '[data-testid="stAppViewContainer"]') {{
+          el.style.setProperty('width', 'calc(100vw - ' + total + 'px)', 'important');
+        }}
+      }});
+    }});
+  }}
+
   function ensureCollapseBtn(panel) {{
     const btn = makeChevronBtn(
       'gatewai-rsb-collapse-btn',
@@ -2437,16 +2486,18 @@ def install_right_sidebar_chrome(open_slots, width_px):
       const c = doc.getElementById('gatewai-rsb-collapse-btn');
       if (c) c.remove();
       ensureExpandBtn();
+      insetMainFromRightChrome();
       return;
     }}
     // Keep the pane mounted (like st.sidebar) — only the width collapses.
     panel.classList.add('gatewai-rsb-panel');
-    panel.style.width = px + 'px';
+    panel.style.setProperty('width', px + 'px', 'important');
     panel.style.visibility = open ? 'visible' : 'hidden';
     panel.style.pointerEvents = open ? 'auto' : 'none';
     ensureDrag(panel);
     ensureCollapseBtn(panel);
     ensureExpandBtn();
+    insetMainFromRightChrome();
   }}
 
   function mount() {{
@@ -2570,6 +2621,32 @@ def install_live_preview_chrome(open_preview, width_px):
     return px;
   }}
 
+  function insetMainFromRightChrome() {{
+    const rsbRaw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-rsb-width');
+    const lpRaw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-lp-width');
+    const rsb = parseInt(rsbRaw, 10);
+    const lp = parseInt(lpRaw, 10);
+    const total = (isNaN(rsb) ? 0 : rsb) + (isNaN(lp) ? 0 : lp);
+    doc.documentElement.style.setProperty('--gatewai-right-chrome', total + 'px');
+    const sel = [
+      '[data-testid="stAppViewContainer"]',
+      '[data-testid="stHeader"]',
+      'section.main',
+      '[data-testid="stMain"]',
+      '[data-testid="stBottom"]',
+      '[data-testid="stBottomBlockContainer"]'
+    ];
+    sel.forEach(function (s) {{
+      Array.from(doc.querySelectorAll(s)).forEach(function (el) {{
+        el.style.setProperty('right', total + 'px', 'important');
+        el.style.setProperty('max-width', 'calc(100vw - ' + total + 'px)', 'important');
+        if (s === '[data-testid="stAppViewContainer"]') {{
+          el.style.setProperty('width', 'calc(100vw - ' + total + 'px)', 'important');
+        }}
+      }});
+    }});
+  }}
+
   function isMainChrome(node) {{
     if (!node || !node.querySelector) return true;
     if (node.querySelector('[data-testid="stChatMessage"]')) return true;
@@ -2661,6 +2738,7 @@ def install_live_preview_chrome(open_preview, width_px):
         doc.documentElement.style.setProperty('--gatewai-lp-width', '0px');
       }}
     }}
+    insetMainFromRightChrome();
   }}
 
   w.__gatewaiLpMount = mount;
