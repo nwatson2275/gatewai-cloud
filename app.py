@@ -586,14 +586,12 @@ st.markdown(
             max-width: 100%;
         }
         /*
-          FOUC guard: Memory/LP widgets mount in the main column until chrome JS
-          adds .gatewai-rsb-panel / .gatewai-lp-panel. Hide that in-flow block so
-          refresh does not flash a file-list "Editor" in the middle.
-          Only match the vertical block that *directly* owns the shell marker —
-          not the main column (which merely nests it).
+          FOUC guard: Memory/LP mount in the main column until chrome JS pins them.
+          Hide the shell's element-container and every following sibling; restore
+          only inside the pinned panel (open). Structure-agnostic vs Streamlit nesting.
         */
-        [data-testid="stVerticalBlock"]:not(.gatewai-rsb-panel):has(> [data-testid="element-container"] .gatewai-rsb-shell),
-        [data-testid="stVerticalBlock"]:not(.gatewai-rsb-panel):has(> div > [data-testid="element-container"] .gatewai-rsb-shell) {
+        [data-testid="element-container"]:has(.gatewai-rsb-shell),
+        [data-testid="element-container"]:has(.gatewai-rsb-shell) ~ * {
             position: fixed !important;
             top: 0 !important;
             right: 0 !important;
@@ -609,8 +607,25 @@ st.markdown(
             border: none !important;
             z-index: 0 !important;
         }
-        [data-testid="stVerticalBlock"]:not(.gatewai-lp-panel):has(> [data-testid="element-container"] .gatewai-lp-shell),
-        [data-testid="stVerticalBlock"]:not(.gatewai-lp-panel):has(> div > [data-testid="element-container"] .gatewai-lp-shell) {
+        .gatewai-rsb-panel:not(.gatewai-rsb-collapsed) > [data-testid="element-container"]:has(.gatewai-rsb-shell),
+        .gatewai-rsb-panel:not(.gatewai-rsb-collapsed) > [data-testid="element-container"]:has(.gatewai-rsb-shell) ~ *,
+        .gatewai-rsb-panel:not(.gatewai-rsb-collapsed) > div > [data-testid="element-container"]:has(.gatewai-rsb-shell),
+        .gatewai-rsb-panel:not(.gatewai-rsb-collapsed) > div > [data-testid="element-container"]:has(.gatewai-rsb-shell) ~ * {
+            position: static !important;
+            width: auto !important;
+            height: auto !important;
+            max-height: none !important;
+            margin: unset !important;
+            padding: unset !important;
+            overflow: visible !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
+            border: unset !important;
+            z-index: auto !important;
+        }
+        [data-testid="element-container"]:has(.gatewai-lp-shell),
+        [data-testid="element-container"]:has(.gatewai-lp-shell) ~ * {
             position: fixed !important;
             top: 0 !important;
             right: 0 !important;
@@ -625,6 +640,27 @@ st.markdown(
             pointer-events: none !important;
             border: none !important;
             z-index: 0 !important;
+        }
+        .gatewai-lp-panel > [data-testid="element-container"]:has(.gatewai-lp-shell),
+        .gatewai-lp-panel > [data-testid="element-container"]:has(.gatewai-lp-shell) ~ *,
+        .gatewai-lp-panel > div > [data-testid="element-container"]:has(.gatewai-lp-shell),
+        .gatewai-lp-panel > div > [data-testid="element-container"]:has(.gatewai-lp-shell) ~ * {
+            position: static !important;
+            width: auto !important;
+            height: auto !important;
+            max-height: none !important;
+            margin: unset !important;
+            padding: unset !important;
+            overflow: visible !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
+            border: unset !important;
+            z-index: auto !important;
+        }
+        /* One-shot veil on browser refresh — parent flag skips Streamlit reruns. */
+        html.gatewai-booting [data-testid="stMain"] {
+            opacity: 0 !important;
         }
         .gatewai-rsb-panel {
             position: fixed !important;
@@ -791,6 +827,83 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
+
+_FORCE_GATEWAI_COOKIE = "gatewai_force_gatewai"
+
+
+def install_boot_veil():
+    """Hide main pane for one browser navigation/reload until right-rail chrome pins.
+
+    Parent-window flag survives Streamlit reruns so normal clicks do not flicker.
+    pagehide stamps a cookie so the next Python run can force GateWai after refresh
+    (Streamlit may otherwise restore Editor from the prior WebSocket session).
+    """
+    components.html(
+        f"""
+<script>
+(function () {{
+  const w = window.parent;
+  const doc = w.document;
+  const FLAG = '__gatewaiBootVeilHook';
+
+  function clearBoot() {{
+    try {{ doc.documentElement.classList.remove('gatewai-booting'); }} catch (e) {{}}
+    w.__gatewaiBootVeilDone = true;
+  }}
+  w.__gatewaiBootClear = clearBoot;
+
+  if (!w[FLAG]) {{
+    w[FLAG] = true;
+    const stamp = function () {{
+      try {{
+        const secure = w.location.protocol === 'https:' ? '; Secure' : '';
+        doc.cookie = '{_FORCE_GATEWAI_COOKIE}=1; path=/; max-age=120; SameSite=Lax' + secure;
+      }} catch (e) {{}}
+    }};
+    w.addEventListener('pagehide', stamp);
+    w.addEventListener('beforeunload', stamp);
+  }}
+
+  if (w.__gatewaiBootVeilDone) return;
+  try {{ doc.documentElement.classList.add('gatewai-booting'); }} catch (e) {{}}
+  setTimeout(clearBoot, 700);
+}})();
+</script>
+        """,
+        height=0,
+    )
+
+
+def read_force_gatewai_cookie():
+    try:
+        cookies = getattr(st.context, "cookies", None)
+        if cookies is None or not hasattr(cookies, "get"):
+            return False
+        return str(cookies.get(_FORCE_GATEWAI_COOKIE) or "").strip() == "1"
+    except Exception:
+        return False
+
+
+def clear_force_gatewai_cookie_js():
+    components.html(
+        f"""
+<script>
+(function () {{
+  try {{
+    const w = window.parent;
+    const secure = w.location.protocol === 'https:' ? '; Secure' : '';
+    w.document.cookie = '{_FORCE_GATEWAI_COOKIE}=; path=/; max-age=0; SameSite=Lax' + secure;
+  }} catch (e) {{}}
+}})();
+</script>
+        """,
+        height=0,
+    )
+
+
+# Veil as early as possible on real browser loads (before Memory/Editor paint).
+install_boot_veil()
 
 
 _CHAT_DRAFT_COOKIE = "gatewai_chat_draft"
@@ -2552,6 +2665,9 @@ def install_right_sidebar_chrome(open_slots, width_px):
     }}
     ensureExpandBtn();
     insetMainFromRightChrome();
+    try {{
+      if (typeof w.__gatewaiBootClear === 'function') w.__gatewaiBootClear();
+    }} catch (e) {{}}
   }}
 
   function mount() {{
@@ -7562,9 +7678,16 @@ _mobile_shell = is_mobile_client()
 # Desktop: keep the pane in the DOM always; JS only collapses its width.
 _use_app_rsb = not _mobile_shell
 
+# Browser refresh stamps gatewai_force_gatewai — land on GateWai, drop queued Editor.
+_force_gatewai = read_force_gatewai_cookie()
+if _force_gatewai:
+    st.session_state.main_view_selector = _MAIN_GATEWAI
+    st.session_state.pop("_pending_main_view", None)
+    clear_force_gatewai_cookie_js()
+
 # Apply queued view switches BEFORE the radio widget is created.
 _pending_view = st.session_state.pop("_pending_main_view", None)
-if _pending_view in (_MAIN_GATEWAI, _MAIN_EDITOR):
+if (not _force_gatewai) and _pending_view in (_MAIN_GATEWAI, _MAIN_EDITOR):
     st.session_state.main_view_selector = _pending_view
 
 main_view = st.radio(
@@ -7575,11 +7698,9 @@ main_view = st.radio(
     label_visibility="collapsed",
 )
 
-# Install chrome before the Memory widgets paint so the MutationObserver can
-# pin the rail as soon as the shell marker appears (CSS FOUC guard covers the gap).
+# Chrome observer first; Memory rail mounts AFTER the main view so GateWai/Editor
+# paint before the file list (avoids middle "Editor" flash on refresh).
 install_right_sidebar_chrome(_show_slots if _use_app_rsb else False, _rsb_width)
-if _use_app_rsb:
-    render_app_memory_sidebar()
 
 # =========================================================
 # VIEW 1: GateWai (Chat & Artifacts)
@@ -8012,6 +8133,11 @@ else:
             except Exception as e:
                 st.error(f"Error reading file: {e}")
             pass
+
+# Memory rail last — after GateWai/Editor — so refresh does not paint the file
+# list in the middle before the active main view.
+if _use_app_rsb:
+    render_app_memory_sidebar()
 
 # --- 9. CHAT + AUTO-SHADOW (AFTER both tabs so Editor always mounts before the API call) ---
 # After Submit we remount once, then run the model on this following pass.
