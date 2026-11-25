@@ -556,35 +556,82 @@ st.markdown(
             margin-top: 15px; margin-bottom: 5px; font-weight: bold;
             color: #424242; border-bottom: 1px solid #e0e0e0;
         }
-        /* Right Memory-slots rail — mirror Streamlit's left sidebar (grey, bordered). */
-        [data-testid="column"]:has(.gatewai-rsb-marker) {
+        /* Right Memory sidebar — true app-level twin of [data-testid="stSidebar"]. */
+        :root {
+            --gatewai-rsb-width: 0px;
+        }
+        /* Push the WHOLE app (left sidebar + main, incl. project manager) left. */
+        [data-testid="stAppViewContainer"] {
+            margin-right: var(--gatewai-rsb-width) !important;
+            transition: margin-right 0.12s ease;
+        }
+        .gatewai-rsb-panel {
+            position: fixed !important;
+            top: 0 !important;
+            right: 0 !important;
+            width: var(--gatewai-rsb-width) !important;
+            height: 100vh !important;
+            max-height: 100vh !important;
             background-color: #f0f2f6 !important;
             border-left: 1px solid rgba(49, 51, 63, 0.2) !important;
-            padding: 0.35rem 0.75rem 1rem 0.75rem !important;
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+            z-index: 1000100 !important;
+            padding: 0.75rem 0.85rem 1.25rem 1rem !important;
+            box-sizing: border-box !important;
+            /* Fixed removes it from flow — no hole left in the main column. */
         }
-        [data-testid="column"]:has(.gatewai-rsb-marker) .section-header {
-            border-bottom-color: rgba(49, 51, 63, 0.15);
+        .gatewai-rsb-drag {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 6px !important;
+            height: 100% !important;
+            cursor: col-resize !important;
+            z-index: 1000102 !important;
+            background: transparent !important;
         }
-        /* Desktop-only sticky scroll for the right rail (not mobile — unglues layout). */
-        @media (min-width: 769px) {
-            [data-testid="column"]:has(.gatewai-rsb-marker) > div {
-                position: sticky;
-                top: 0.25rem;
-                max-height: calc(100vh - 1rem);
-                overflow-y: auto;
-                padding-bottom: 1rem;
-            }
-            /* Preview column (no rsb marker) keeps the older pane scroll. */
-            [data-testid="column"]:nth-child(2):not(:has(.gatewai-rsb-marker)) [data-testid="stVerticalBlock"] {
-                height: 85vh; overflow-y: auto; border-left: 1px solid #e0e0e0; padding-left: 20px;
-            }
+        .gatewai-rsb-drag:hover,
+        .gatewai-rsb-drag.dragging {
+            background: rgba(49, 51, 63, 0.18) !important;
         }
-        /* Collapse / expand chevrons match left-sidebar control weight. */
-        div.gatewai-rsb-collapse button,
-        div.gatewai-rsb-expand button {
+        .gatewai-rsb-edge-tab {
+            position: fixed !important;
+            top: 50% !important;
+            right: 0 !important;
+            transform: translateY(-50%) !important;
+            z-index: 1000103 !important;
+            background: #f0f2f6 !important;
+            border: 1px solid rgba(49, 51, 63, 0.2) !important;
+            border-right: none !important;
+            border-radius: 6px 0 0 6px !important;
+            padding: 0.55rem 0.35rem !important;
+            font-weight: 700 !important;
+            letter-spacing: -0.06em !important;
+            cursor: pointer !important;
+            color: #31333F !important;
+            line-height: 1 !important;
+            box-shadow: -1px 0 4px rgba(0,0,0,0.06) !important;
+        }
+        div.gatewai-rsb-collapse button {
             font-weight: 700 !important;
             letter-spacing: -0.05em;
             min-height: 2.25rem;
+        }
+        /* Streamlit >> target for the edge tab — keep in DOM, hide from layout. */
+        div.gatewai-rsb-expand {
+            position: absolute !important;
+            width: 1px !important;
+            height: 1px !important;
+            opacity: 0 !important;
+            overflow: hidden !important;
+            pointer-events: none !important;
+        }
+        /* Live Preview center pane scroll (desktop). */
+        @media (min-width: 769px) {
+            [data-testid="column"]:nth-child(2) [data-testid="stVerticalBlock"] {
+                height: 85vh; overflow-y: auto; border-left: 1px solid #e0e0e0; padding-left: 20px;
+            }
         }
         div.stButton > button:first-child { width: 100%; border-radius: 5px; }
         .purge-btn { border: 1px solid #ff4b4b; color: #ff4b4b; }
@@ -1211,7 +1258,13 @@ def render_memory_slot_sidebar(key_prefix, height=480, show_meta=True):
         st.caption("Active")
 
     core_files = set(CORE_SCHEMA.values())
-    list_box = st.container(height=height) if len(all_files) > 8 else st.container()
+    # height=None → let the parent sidebar scroll (app-level right rail).
+    if height is None:
+        list_box = st.container()
+    elif len(all_files) > 8:
+        list_box = st.container(height=height)
+    else:
+        list_box = st.container()
 
     def render_slot_row(fname):
         name_col, active_col = st.columns([3, 1])
@@ -1955,8 +2008,41 @@ ENGINE_ROOM_FIELDS = (
 )
 
 
+_RSB_WIDTH_COOKIE = "gatewai_rsb_width"
+_RSB_WIDTH_LS = "gatewai_rsb_width"
+_RSB_DEFAULT_WIDTH_PX = 320
+_RSB_MIN_WIDTH_PX = 220
+_RSB_MAX_WIDTH_PX = 560
+
+
+def _clamp_rsb_width_px(raw):
+    """Normalize width: legacy percent (≤48) → px; otherwise clamp pixel width."""
+    try:
+        width = int(float(raw))
+    except (TypeError, ValueError):
+        return _RSB_DEFAULT_WIDTH_PX
+    # Older builds stored 18–48 as a column percent.
+    if 1 <= width <= 48:
+        width = int(1100 * (width / 100.0))
+    return max(_RSB_MIN_WIDTH_PX, min(_RSB_MAX_WIDTH_PX, width))
+
+
+def read_rsb_width_cookie():
+    """Width last set by dragging the right-sidebar border (available next request)."""
+    try:
+        cookies = getattr(st.context, "cookies", None)
+        if cookies is None or not hasattr(cookies, "get"):
+            return None
+        raw = cookies.get(_RSB_WIDTH_COOKIE)
+        if raw is None or str(raw).strip() == "":
+            return None
+        return _clamp_rsb_width_px(raw)
+    except Exception:
+        return None
+
+
 def persist_ui_layout_prefs(project_name=None):
-    """Write the shared Memory-slots right rail into config.json (survive refresh)."""
+    """Write Memory-slots open/width into config.json (survive refresh)."""
     project_name = project_name or st.session_state.get("active_project") or ""
     if not project_name:
         return
@@ -1970,17 +2056,12 @@ def persist_ui_layout_prefs(project_name=None):
             st.session_state.get("show_memory_slots", False),
         )
     )
-    try:
-        width = int(
-            st.session_state.get(
-                "memory_slots_width_pref",
-                st.session_state.get("memory_slots_width", 28),
-            )
+    width = _clamp_rsb_width_px(
+        st.session_state.get(
+            "memory_slots_width_pref",
+            st.session_state.get("memory_slots_width", _RSB_DEFAULT_WIDTH_PX),
         )
-    except (TypeError, ValueError):
-        width = 28
-    width = max(18, min(48, width))
-    # One shared rail for GateWai + Editor; keep legacy keys in sync for old clients.
+    )
     existing["show_memory_slots"] = open_slots
     existing["memory_slots_width"] = width
     existing["gatewai_show_slots"] = open_slots
@@ -2002,61 +2083,196 @@ def set_memory_slots_open(open_slots):
     persist_ui_layout_prefs()
 
 
-def memory_slots_width_pct():
-    """Persisted width of the right Memory-slots rail (percent of the main row)."""
+def memory_slots_width_px():
+    """Persisted pixel width of the app-level right Memory sidebar."""
+    cookie_w = read_rsb_width_cookie()
+    if cookie_w is not None:
+        st.session_state.memory_slots_width_pref = cookie_w
+        st.session_state.memory_slots_width = cookie_w
     if "memory_slots_width_pref" not in st.session_state:
-        st.session_state.memory_slots_width_pref = 28
-    try:
-        width = int(st.session_state.memory_slots_width_pref)
-    except (TypeError, ValueError):
-        width = 28
-    return max(18, min(48, width))
+        st.session_state.memory_slots_width_pref = _RSB_DEFAULT_WIDTH_PX
+    width = _clamp_rsb_width_px(st.session_state.memory_slots_width_pref)
+    st.session_state.memory_slots_width_pref = width
+    return width
 
 
-def memory_slots_column_spec():
-    """Return (main_weight, rail_weight) for an open right sidebar."""
-    w = memory_slots_width_pct()
-    return [max(52, 100 - w), w]
+def install_right_sidebar_chrome(open_slots, width_px):
+    """Fix Memory panel to the viewport right, push the whole app, drag-resize border.
 
+    Mirrors Streamlit's left sidebar: grey full-height pane, independent scroll,
+    border drag to expand/collapse width. Open/closed still driven by Streamlit
+    session state (<< button / >> tab).
+    """
+    open_js = "true" if open_slots else "false"
+    width_px = int(_clamp_rsb_width_px(width_px))
+    components.html(
+        f"""
+<script>
+(function () {{
+  const w = window.parent;
+  const doc = w.document;
+  const OPEN = {open_js};
+  const WIDTH = {width_px};
+  const MIN_W = {_RSB_MIN_WIDTH_PX};
+  const MAX_W = {_RSB_MAX_WIDTH_PX};
+  const LS_KEY = '{_RSB_WIDTH_LS}';
+  const COOKIE = '{_RSB_WIDTH_COOKIE}';
+  const FLAG = '__gatewaiRightSidebarChrome';
 
-def render_memory_slots_rail(height=520, show_meta=True):
-    """Grey right sidebar (symmetrical to st.sidebar): << collapse + resizable width."""
-    # Marker for CSS — paints this column like the left sidebar.
-    st.markdown('<div class="gatewai-rsb-marker" aria-hidden="true"></div>', unsafe_allow_html=True)
+  function setCookie(px) {{
+    try {{
+      const secure = w.location.protocol === 'https:' ? '; Secure' : '';
+      doc.cookie = COOKIE + '=' + encodeURIComponent(String(px))
+        + '; path=/; max-age=31536000; SameSite=Lax' + secure;
+    }} catch (e) {{}}
+    try {{ w.localStorage.setItem(LS_KEY, String(px)); }} catch (e) {{}}
+  }}
 
-    collapse_col, title_col = st.columns([1, 4])
-    with collapse_col:
-        st.markdown('<div class="gatewai-rsb-collapse">', unsafe_allow_html=True)
-        if st.button("<<", key="memory_slots_collapse_btn", help="Collapse Memory slots sidebar", use_container_width=True):
-            set_memory_slots_open(False)
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-    with title_col:
-        st.markdown("### 📂 Memory")
+  function applyWidth(px) {{
+    px = Math.max(MIN_W, Math.min(MAX_W, Math.round(px)));
+    doc.documentElement.style.setProperty('--gatewai-rsb-width', OPEN ? (px + 'px') : '0px');
+    return px;
+  }}
 
-    if "memory_slots_width" not in st.session_state:
-        st.session_state.memory_slots_width = memory_slots_width_pct()
+  function findPanel() {{
+    const shell = doc.querySelector('.gatewai-rsb-shell');
+    if (!shell) return null;
+    let el = shell.closest('[data-testid="stVerticalBlock"]');
+    if (!el) return shell.parentElement;
+    // Climb until this block owns the collapse control (full sidebar container),
+    // but stop before the page root that also holds GateWai/Editor.
+    while (el && !el.querySelector('.gatewai-rsb-collapse')) {{
+      const parent = el.parentElement
+        && el.parentElement.closest('[data-testid="stVerticalBlock"]');
+      if (!parent || parent === el) break;
+      // Don't promote into a block that also contains the main-view radio.
+      if (parent.querySelector('[data-testid="stRadio"]')) break;
+      el = parent;
+    }}
+    return el;
+  }}
 
-    def _remember_memory_slots_width():
-        try:
-            st.session_state.memory_slots_width_pref = max(
-                18, min(48, int(st.session_state.memory_slots_width))
-            )
-        except (TypeError, ValueError):
-            st.session_state.memory_slots_width_pref = 28
-        persist_ui_layout_prefs()
+  let _dragging = false;
+  function ensureDrag(panel) {{
+    let handle = panel.querySelector(':scope > .gatewai-rsb-drag');
+    if (!handle) {{
+      handle = doc.createElement('div');
+      handle.className = 'gatewai-rsb-drag';
+      handle.title = 'Drag to resize';
+      panel.appendChild(handle);
+    }}
+    if (handle.dataset.bound === '1') return;
+    handle.dataset.bound = '1';
+    handle.addEventListener('mousedown', function (ev) {{
+      ev.preventDefault();
+      _dragging = true;
+      handle.classList.add('dragging');
+      doc.body.style.cursor = 'col-resize';
+      doc.body.style.userSelect = 'none';
+    }});
+    doc.addEventListener('mousemove', function (ev) {{
+      if (!_dragging) return;
+      const px = applyWidth(w.innerWidth - ev.clientX);
+      panel.style.width = px + 'px';
+    }});
+    doc.addEventListener('mouseup', function () {{
+      if (!_dragging) return;
+      _dragging = false;
+      handle.classList.remove('dragging');
+      doc.body.style.cursor = '';
+      doc.body.style.userSelect = '';
+      const raw = getComputedStyle(doc.documentElement).getPropertyValue('--gatewai-rsb-width');
+      const px = parseInt(raw, 10) || WIDTH;
+      setCookie(px);
+    }});
+  }}
 
-    st.slider(
-        "Sidebar width",
-        min_value=18,
-        max_value=48,
-        key="memory_slots_width",
-        help="Drag to widen or narrow the Memory slots sidebar.",
-        on_change=_remember_memory_slots_width,
+  function ensureEdgeTab() {{
+    let tab = doc.getElementById('gatewai-rsb-edge-tab');
+    if (OPEN) {{
+      if (tab) tab.remove();
+      return;
+    }}
+    if (!tab) {{
+      tab = doc.createElement('button');
+      tab.id = 'gatewai-rsb-edge-tab';
+      tab.className = 'gatewai-rsb-edge-tab';
+      tab.type = 'button';
+      tab.title = 'Expand Memory slots sidebar';
+      tab.textContent = '>>';
+      tab.addEventListener('click', function () {{
+        // Click the Streamlit expand control if present; else set a cookie flag.
+        const btn = Array.from(doc.querySelectorAll('button'))
+          .find(b => (b.innerText || '').trim() === '>>');
+        if (btn) btn.click();
+      }});
+      doc.body.appendChild(tab);
+    }}
+  }}
+
+  function mount() {{
+    if (_dragging) return;
+    // Prefer last dragged width from localStorage over the Python snapshot.
+    let startW = WIDTH;
+    try {{
+      const ls = parseInt(w.localStorage.getItem(LS_KEY) || '', 10);
+      if (ls) startW = Math.max(MIN_W, Math.min(MAX_W, ls));
+    }} catch (e) {{}}
+    applyWidth(startW);
+    const panel = findPanel();
+    if (OPEN && panel) {{
+      panel.classList.add('gatewai-rsb-panel');
+      ensureDrag(panel);
+    }} else if (panel) {{
+      panel.classList.remove('gatewai-rsb-panel');
+    }}
+    ensureEdgeTab();
+  }}
+
+  // Always point at the latest mount (OPEN/WIDTH change every Streamlit rerun).
+  w.__gatewaiRsbMount = mount;
+  function mountSoon() {{
+    if (w.__gatewaiRsbTimer) clearTimeout(w.__gatewaiRsbTimer);
+    w.__gatewaiRsbTimer = setTimeout(function () {{
+      if (typeof w.__gatewaiRsbMount === 'function') w.__gatewaiRsbMount();
+    }}, 50);
+  }}
+  mount();
+  setTimeout(function () {{ if (w.__gatewaiRsbMount) w.__gatewaiRsbMount(); }}, 120);
+  setTimeout(function () {{ if (w.__gatewaiRsbMount) w.__gatewaiRsbMount(); }}, 500);
+  if (!w[FLAG]) {{
+    w[FLAG] = true;
+    try {{
+      const obs = new MutationObserver(mountSoon);
+      obs.observe(doc.body, {{ childList: true, subtree: true }});
+    }} catch (e) {{}}
+  }}
+}})();
+</script>
+        """,
+        height=0,
     )
 
-    st.caption("Tap 🟢/⚪ to include or hide a slot in chat context.")
-    render_memory_slot_sidebar("memory", height=height, show_meta=show_meta)
+
+def render_app_memory_sidebar():
+    """App-level Memory sidebar content (fixed to the right by install_right_sidebar_chrome)."""
+    # One nested block so JS can pin the whole sidebar without grabbing GateWai/Editor.
+    with st.container():
+        st.markdown('<div class="gatewai-rsb-shell" aria-hidden="true"></div>', unsafe_allow_html=True)
+
+        collapse_col, title_col = st.columns([1, 4])
+        with collapse_col:
+            st.markdown('<div class="gatewai-rsb-collapse">', unsafe_allow_html=True)
+            if st.button("<<", key="memory_slots_collapse_btn", help="Collapse Memory slots sidebar", use_container_width=True):
+                set_memory_slots_open(False)
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+        with title_col:
+            st.markdown("### 📂 Memory")
+
+        st.caption("Tap 🟢/⚪ to include or hide a slot in chat context. Drag the left border to resize.")
+        # Panel itself scrolls like the left sidebar — no nested height box needed.
+        render_memory_slot_sidebar("memory", height=None, show_meta=True)
 
 
 def render_live_preview_pane():
@@ -4343,11 +4559,9 @@ if st.session_state.loaded_project != st.session_state.active_project:
         )
         st.session_state.show_memory_slots_pref = _slots_open
         st.session_state.show_memory_slots = _slots_open
-        try:
-            _slots_w = int(cfg.get("memory_slots_width", 28) or 28)
-        except (TypeError, ValueError):
-            _slots_w = 28
-        st.session_state.memory_slots_width_pref = max(18, min(48, _slots_w))
+        st.session_state.memory_slots_width_pref = _clamp_rsb_width_px(
+            cfg.get("memory_slots_width", _RSB_DEFAULT_WIDTH_PX)
+        )
         st.session_state.memory_slots_width = st.session_state.memory_slots_width_pref
          # --- DEBUG: Print session state after loading ---
 #        print(f"DEBUG LOAD_PROJECT_STATE: st.session_state.last_harvest_message_index set to {st.session_state.last_harvest_message_index}")
@@ -6825,31 +7039,35 @@ _MAIN_EDITOR = "📝 Editor"
 if "main_view_selector" not in st.session_state:
     st.session_state.main_view_selector = _MAIN_GATEWAI
 
-# Shared Memory-slots >> / << lives ABOVE both views so open/closed survives
-# GateWai ↔ Editor (Streamlit drops unused widget keys otherwise).
+# App-level Memory sidebar (symmetrical to st.sidebar): open/closed + width.
 if "show_memory_slots_pref" not in st.session_state:
     st.session_state.show_memory_slots_pref = False
 _show_slots = bool(st.session_state.show_memory_slots_pref)
 st.session_state.show_memory_slots = _show_slots
+_rsb_width = memory_slots_width_px()
+_mobile_shell = is_mobile_client()
+# Desktop: fixed right pane pushes the whole app. Mobile: expander inside the view.
+_use_app_rsb = _show_slots and not _mobile_shell
 
-_view_toggle, _slots_toggle = st.columns([6, 1])
-with _view_toggle:
-    main_view = st.radio(
-        "Main view",
-        [_MAIN_GATEWAI, _MAIN_EDITOR],
-        horizontal=True,
-        key="main_view_selector",
-        label_visibility="collapsed",
-    )
-with _slots_toggle:
-    # Collapsed: >> expands the grey right sidebar (mirrors left-sidebar chevron).
-    # Expanded: << lives inside the rail itself.
-    if not _show_slots:
-        st.markdown('<div class="gatewai-rsb-expand">', unsafe_allow_html=True)
-        if st.button(">>", key="memory_slots_expand_btn", help="Expand Memory slots sidebar", use_container_width=True):
-            set_memory_slots_open(True)
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+main_view = st.radio(
+    "Main view",
+    [_MAIN_GATEWAI, _MAIN_EDITOR],
+    horizontal=True,
+    key="main_view_selector",
+    label_visibility="collapsed",
+)
+
+# Hidden expand target for the fixed >> edge tab (and a visible fallback on mobile).
+if not _show_slots:
+    st.markdown('<div class="gatewai-rsb-expand">', unsafe_allow_html=True)
+    if st.button(">>", key="memory_slots_expand_btn", help="Expand Memory slots sidebar"):
+        set_memory_slots_open(True)
+        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+if _use_app_rsb:
+    render_app_memory_sidebar()
+install_right_sidebar_chrome(_use_app_rsb, _rsb_width)
 
 # =========================================================
 # VIEW 1: GateWai (Chat & Artifacts)
@@ -6862,25 +7080,11 @@ if main_view == _MAIN_GATEWAI:
     _turn_busy = bool(st.session_state.get("held_chat_prompt")) or bool(
         st.session_state.get("prompt_submit_in_flight")
     ) or bool(_pending_now_prompt) or bool(st.session_state.get("pending_updates"))
-    _mobile = is_mobile_client()
-    _want_slots = _show_slots and not _mobile and not _turn_busy
+    _mobile = _mobile_shell
     _want_preview = bool(st.session_state.show_preview) and not _turn_busy and not _mobile
-    # Layout:
-    #   Memory rail (grey, right) is the file-list sidebar.
-    #   Live Preview is a center content pane — it no longer steals the right rail.
-    #   Both can be open: Chat | Preview | Memory.
-    col_slots = None
+    # Memory is the app-level right sidebar. Live Preview is only a center split.
     col_preview = None
-    if _want_slots and _want_preview:
-        _rail = memory_slots_width_pct()
-        _main = max(52, 100 - _rail)
-        _chat = max(26, int(_main * 0.5))
-        _prev = max(26, _main - _chat)
-        col_chat, col_preview, col_slots = st.columns([_chat, _prev, _rail])
-    elif _want_slots:
-        _main_w, _rail_w = memory_slots_column_spec()
-        col_chat, col_slots = st.columns([_main_w, _rail_w])
-    elif _want_preview:
+    if _want_preview:
         col_chat, col_preview = st.columns(2)
     else:
         col_chat = st.container()
@@ -6906,8 +7110,8 @@ if main_view == _MAIN_GATEWAI:
         # Staging lives here (same tab as chat) — not above the tabs.
         render_staging_area()
 
-        # Mobile / busy: preview + slots under chat (not extra columns that unglue layout).
-        if _show_slots and col_slots is None:
+        # Mobile: Memory + Preview under chat (fixed right sidebar is desktop-only).
+        if _show_slots and _mobile:
             with st.expander("📂 Memory slots", expanded=True):
                 render_memory_slot_sidebar("memory", height=280, show_meta=False)
         if bool(st.session_state.show_preview) and col_preview is None and not _turn_busy:
@@ -6942,33 +7146,21 @@ if main_view == _MAIN_GATEWAI:
         with col_preview:
             render_live_preview_pane()
 
-    if col_slots is not None:
-        with col_slots:
-            render_memory_slots_rail(height=520, show_meta=True)
-
 # =========================================================
 # VIEW 2: EDITOR (The Integrated IDE)
 # =========================================================
 else:
     pin_editor_tab_to_top()
-    # Same shared Memory-slots rail as GateWai (right side when open).
-    _mobile_ed = is_mobile_client()
-    _use_editor_slots = _show_slots and not _mobile_ed
-    if _use_editor_slots:
-        _main_w, _rail_w = memory_slots_column_spec()
-        col_editor, col_slots = st.columns([_main_w, _rail_w])
-    else:
-        col_editor = st.container()
-        col_slots = None
-
+    # Memory sidebar is app-level (right); Editor uses the full remaining main pane.
     if "selected_file" not in st.session_state:
         st.session_state.selected_file = CORE_SCHEMA.get("summary.txt", "")
     selected_file = st.session_state.get("selected_file", CORE_SCHEMA.get("summary.txt", ""))
 
-    if col_slots is not None:
-        with col_slots:
-            render_memory_slots_rail(height=520, show_meta=True)
+    if _show_slots and _mobile_shell:
+        with st.expander("📂 Memory slots", expanded=True):
+            render_memory_slot_sidebar("memory", height=280, show_meta=False)
 
+    col_editor = st.container()
     with col_editor:
         st.subheader(f"✏️ {st.session_state.active_project}  ·  {selected_file}")
         st.caption("💡 Pro-Tip: Use Ctrl+F (or Cmd+F on Mac) to search within the editor.")
@@ -7311,11 +7503,6 @@ else:
             except Exception as e:
                 st.error(f"Error reading file: {e}")
             pass
-
-    # Mobile: Memory slots under the editor (same shared rail as GateWai).
-    if _show_slots and col_slots is None:
-        with st.expander("📂 Memory slots", expanded=True):
-            render_memory_slot_sidebar("memory", height=280, show_meta=False)
 
 # --- 9. CHAT + AUTO-SHADOW (AFTER both tabs so Editor always mounts before the API call) ---
 # After Submit we remount once, then run the model on this following pass.
