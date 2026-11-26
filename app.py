@@ -902,16 +902,11 @@ def install_boot_veil():
     w.__gatewaiBootVeilDone = true;
   }};
 
+  // Do NOT stamp gatewai_force_gatewai on pagehide/beforeunload.
+  // Mobile Safari fires pagehide on background/lock; the next Streamlit rerun
+  // then forced GateWai and made the Editor radio impossible to select.
   if (!w[FLAG]) {{
     w[FLAG] = true;
-    const stamp = function () {{
-      try {{
-        const secure = w.location.protocol === 'https:' ? '; Secure' : '';
-        doc.cookie = '{_FORCE_GATEWAI_COOKIE}=1; path=/; max-age=120; SameSite=Lax' + secure;
-      }} catch (e) {{}}
-    }};
-    w.addEventListener('pagehide', stamp);
-    w.addEventListener('beforeunload', stamp);
   }}
 }})();
 </script>
@@ -5649,10 +5644,15 @@ with st.expander("📂 Project Manager", expanded=False):
             if new_p.strip():
                 get_project_paths(new_p.strip())
                 st.session_state.active_project = new_p.strip()
+                # Force disk load for the new project (same as Load).
+                st.session_state.loaded_project = None
                 # --- NEW: Reset Harvest Index for New Project ---
                 st.session_state.last_harvest_message_index = 0
                 # --- END NEW ---
-
+                # New project should start on GateWai, but do not leave a sticky
+                # force cookie that blocks later Editor selection on mobile.
+                st.session_state.main_view_selector = "💬 GateWai"
+                st.session_state.pop("_pending_main_view", None)
 
                 # [NEW] Save to System Cookie
                 try:
@@ -7939,16 +7939,19 @@ _mobile_shell = is_mobile_client()
 # Desktop: keep the pane in the DOM always; JS only collapses its width.
 _use_app_rsb = not _mobile_shell
 
-# Browser refresh stamps gatewai_force_gatewai — land on GateWai, drop queued Editor.
+# Leftover force-GateWai cookie (older builds stamped it on mobile pagehide).
+# Apply at most once per Streamlit session so Editor clicks are not overwritten.
 _force_gatewai = read_force_gatewai_cookie()
 if _force_gatewai:
-    st.session_state.main_view_selector = _MAIN_GATEWAI
-    st.session_state.pop("_pending_main_view", None)
+    if not st.session_state.get("_force_gatewai_consumed"):
+        st.session_state.main_view_selector = _MAIN_GATEWAI
+        st.session_state.pop("_pending_main_view", None)
+        st.session_state._force_gatewai_consumed = True
     clear_force_gatewai_cookie_js()
 
 # Apply queued view switches BEFORE the radio widget is created.
 _pending_view = st.session_state.pop("_pending_main_view", None)
-if (not _force_gatewai) and _pending_view in (_MAIN_GATEWAI, _MAIN_EDITOR):
+if _pending_view in (_MAIN_GATEWAI, _MAIN_EDITOR):
     st.session_state.main_view_selector = _pending_view
 
 main_view = st.radio(
