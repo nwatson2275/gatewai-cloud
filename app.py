@@ -3551,7 +3551,7 @@ def save_project_state(state, name, silent=False):
             return default
 
         if not config_unreadable:
-        config_data = {
+            config_data = {
                 "chat_engine": saved_config_value("chat_engine_set", "chat_engine", "gemini-2.5-flash-lite"),
                 "ingest_engine": saved_config_value("ingest_engine_set", "ingest_engine", "gemini-2.5-pro"),
                 "harvest_engine": saved_config_value("harvest_engine_set", "harvest_engine", "gemini-2.5-pro"),
@@ -3579,8 +3579,8 @@ def save_project_state(state, name, silent=False):
                     "show_memory_slots_pref", "show_memory_slots", False
                 ),
             }
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=4)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, indent=4)
                 f.flush()
                 os.fsync(f.fileno())
 
