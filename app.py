@@ -89,8 +89,16 @@ if st.session_state.get('asset_selector_state_needs_update', False):
 # --- END EARLY STATE MODIFICATION HANDLING ---
 
 
+# Optional instance label (e.g. "Kernel prototype") — set GATEWAI_INSTANCE_LABEL on Render.
+_GATEWAI_INSTANCE_LABEL = os.environ.get("GATEWAI_INSTANCE_LABEL", "").strip()
+_GATEWAI_PAGE_TITLE = (
+    f"Gatewai — {_GATEWAI_INSTANCE_LABEL}"
+    if _GATEWAI_INSTANCE_LABEL
+    else "Gatewai VI - DEV"
+)
+
 st.set_page_config(
-    page_title="Gatewai VI - DEV",
+    page_title=_GATEWAI_PAGE_TITLE,
     page_icon="🤖",
     layout="wide",  # <--- This is the magic key
     initial_sidebar_state="expanded"
@@ -529,7 +537,9 @@ if _GATEWAI_PASSWORD:
             st.session_state.authenticated = True
             st.session_state._emit_auth_cookie = cookie_token
             st.rerun()
-        st.title("Gatewai")
+        st.title("Gatewai" + (f" — {_GATEWAI_INSTANCE_LABEL}" if _GATEWAI_INSTANCE_LABEL else ""))
+        if _GATEWAI_INSTANCE_LABEL:
+            st.info(f"Running **{_GATEWAI_INSTANCE_LABEL}** (not production).")
         st.caption("Enter the vault password to continue.")
         with st.form("gatewai_login"):
             entered = st.text_input("Password", type="password")
@@ -878,7 +888,7 @@ st.markdown(
             overflow: hidden !important;
         }
     </style>
-    """,
+           """,
     unsafe_allow_html=True
 )
 
@@ -3541,7 +3551,7 @@ def save_project_state(state, name, silent=False):
             return default
 
         if not config_unreadable:
-            config_data = {
+        config_data = {
                 "chat_engine": saved_config_value("chat_engine_set", "chat_engine", "gemini-2.5-flash-lite"),
                 "ingest_engine": saved_config_value("ingest_engine_set", "ingest_engine", "gemini-2.5-pro"),
                 "harvest_engine": saved_config_value("harvest_engine_set", "harvest_engine", "gemini-2.5-pro"),
@@ -3569,8 +3579,8 @@ def save_project_state(state, name, silent=False):
                     "show_memory_slots_pref", "show_memory_slots", False
                 ),
             }
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(config_data, f, indent=4)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=4)
                 f.flush()
                 os.fsync(f.fileno())
 
@@ -4926,7 +4936,7 @@ def render_editor_save(selected_file):
     elif confirm and confirm.get("project") == project_name and confirm.get("slot") != selected_file:
         st.session_state.pop("confirm_slot_overwrite", None)
 
-# --- NEW: Function to generate JS for print and reload (for iframe injection) ---
+    # --- NEW: Function to generate JS for print and reload (for iframe injection) ---
 def trigger_print_and_reload_js(printable_div_id):
     js_code = f"""
     <script>
@@ -6518,12 +6528,12 @@ with st.sidebar:
 
                     harvest_stats["chunks"] = len(history_chunks)
                     harvest_stats["log"] = []
-                    h_eng = st.session_state.get('harvest_engine_set', 'gemini-2.5-pro')
+                        h_eng = st.session_state.get('harvest_engine_set', 'gemini-2.5-pro')
                     harvest_client = get_llm_client(h_eng)
                     meta_map = st.session_state.get("loaded_slots_metadata") or {}
                     is_distributed = meta_map.get('MI_Master_Record', {}).get('is_distributed', False)
 
-                    if is_distributed:
+                        if is_distributed:
                         mr_instr = (
                             "This Master Record is distributed. Integrate new facts into the correct existing sections. "
                             "Return the COMPLETE updated file."
@@ -6532,7 +6542,7 @@ with st.sidebar:
                             "For MC_Frontier, keep existing sections, integrate new findings in Compact-Context Analysis, "
                             "and do not drop old material."
                         )
-                    else:
+                        else:
                         mr_instr = (
                             "Preserve the existing Master Record structure. Integrate new hard facts and decisions "
                             "into the right sections. Return the COMPLETE updated file."
@@ -6750,7 +6760,7 @@ with st.sidebar:
                                     meta = st.session_state.loaded_slots_metadata.get(slot, {})
                                     if not meta.get("part_of_dtn", False):
                                         harvest_stats["skipped_not_dtn"].append(slot)
-                                        continue
+                                    continue
 
                                 new_val = extract_content_from_ai_output(harvest_file_text(raw_value))
                                 if not str(new_val).strip():
@@ -6869,7 +6879,7 @@ with st.sidebar:
                     for key in config_keys:
                         save_state_dict[key] = st.session_state.get(key)
                     try:
-                        save_project_state(save_state_dict, st.session_state.active_project, silent=True)
+                    save_project_state(save_state_dict, st.session_state.active_project, silent=True)
                     except Exception as save_e:
                         report_harvest_error(
                             "Harvest staged updates but failed to save project state",
@@ -6898,7 +6908,7 @@ with st.sidebar:
                         should_rerun_after_harvest = True # NEW: Set flag if compaction UI is needed
 
                     # Always rerun so Staging / harvest summary appear in the main pane.
-                    st.rerun()
+                        st.rerun()
 
                 except Exception as e:
                     st.session_state["harvest_in_progress"] = False
@@ -7132,7 +7142,7 @@ with st.sidebar:
                 st.session_state.pending_auto_shadow = True
             # Remount immediately after the toggle — continuing the sidebar/main
             # paint in the same transition was stacking ghost UI on phones.
-            st.rerun()
+                    st.rerun()
 
         # --- [NEW] DATA LIFECYCLE CONTROLS ---
         st.markdown('<div class="section-header">DATA LIFECYCLE</div>', unsafe_allow_html=True)
@@ -7297,7 +7307,7 @@ with st.sidebar:
                                 if restored is not None:
                                     commit_slot_text(selected_slot_for_edits, restored)
                                     st.toast("Restored the previous text.")
-                                    st.rerun()
+                                st.rerun()
                                 st.error("That saved copy could not be found.")
                 else:
                     st.info("No AI edits found for this slot.")
@@ -7696,14 +7706,14 @@ with st.sidebar:
             if applied_key not in st.session_state:
                 st.session_state[applied_key] = selected_domain
             elif selected_domain != st.session_state.get(applied_key):
-                defaults = LENS_PARAMS.get(selected_domain, {"t": 0.7, "p": 0.9})
+            defaults = LENS_PARAMS.get(selected_domain, {"t": 0.7, "p": 0.9})
                 st.session_state.temp_val = defaults["t"]
                 st.session_state.top_p_val = defaults["p"]
                 st.session_state[engine_room_widget_key("temp_val")] = defaults["t"]
                 st.session_state[engine_room_widget_key("top_p_val")] = defaults["p"]
                 st.session_state.domain_content = load_domain_content(selected_domain)
                 st.session_state[applied_key] = selected_domain
-                st.rerun()
+            st.rerun()
         else:
             selected_domain = st.session_state.get("selected_lens_name", "General")
 
@@ -7881,7 +7891,11 @@ with st.sidebar:
 
 
 # --- MAIN LAYOUT (SECTIONS 7 & 8) ---
-st.title(f"🚀 {st.session_state.active_project}")
+if _GATEWAI_INSTANCE_LABEL:
+    st.title(f"Gatewai — {_GATEWAI_INSTANCE_LABEL}")
+    st.caption(f"Project: {st.session_state.active_project}")
+else:
+    st.title(f"🚀 {st.session_state.active_project}")
 
 # --- [NEW] COMPACTION PROTOCOL UI ---
 # This block should be placed high up in the main execution flow,
@@ -8125,7 +8139,7 @@ if st.session_state.get("harvest_result") or st.session_state.get("harvest_error
         if st.button("Dismiss harvest status", key="dismiss_harvest_status"):
             st.session_state.harvest_errors = []
             st.session_state.harvest_result = None
-            st.rerun()
+                st.rerun()
 
 # Staging Area renders inside GateWai via render_staging_area().
 
@@ -8256,13 +8270,13 @@ if main_view == _MAIN_GATEWAI:
                 st.code("\n".join(str(x) for x in _dbg_logs), wrap_lines=True)
             elif _dbg_logs:
                 st.code(str(_dbg_logs), wrap_lines=True)
-            else:
+                            else:
                 st.code("Waiting for input...", wrap_lines=True)
 
 # =========================================================
 # VIEW 2: EDITOR (The Integrated IDE)
 # =========================================================
-else:
+    else:
     # Live Preview is GateWai-only — clear its push width on Editor.
     install_live_preview_chrome(False, 0)
     pin_editor_tab_to_top()
@@ -8302,7 +8316,7 @@ else:
 
             with col_markdown_preview:
                 if "show_markdown_preview" not in st.session_state:
-                    st.session_state.show_markdown_preview = False
+                        st.session_state.show_markdown_preview = False
                 st.checkbox("👁️ Toggle Markdown Preview", key="show_markdown_preview")
             with col_html_preview:
                 if "show_html_preview" not in st.session_state:
@@ -8411,12 +8425,12 @@ else:
                 }
                 raw_ready = st.session_state.raw_download_payload
             if raw_ready:
-                st.download_button(
+            st.download_button(
                     label="⬇️ Save Markdown file",
                     data=raw_ready["text"],
                     file_name=f"{selected_file}.md",
                     mime="text/markdown",
-                    use_container_width=True,
+                use_container_width=True,
                 )
 
         with col_download_html:
@@ -8429,13 +8443,13 @@ else:
                 }
                 html_ready = st.session_state.html_download_payload
             if html_ready:
-                st.download_button(
+            st.download_button(
                     label="⬇️ Save HTML file",
                     data=html_ready["html"],
-                    file_name=f"{selected_file}.html",
-                    mime="text/html",
-                    use_container_width=True,
-                )
+                file_name=f"{selected_file}.html",
+                mime="text/html",
+                use_container_width=True,
+            )
 
         # --- AI Tool Buttons ---
         st.markdown("##### 🤖 AI Tools")
@@ -8653,7 +8667,7 @@ if answered_already:
     scrub_chat_hold()
     prompt = None
 
-should_rerun = False
+    should_rerun = False
 
 # After a model reply: one extra remount to clear pale ghost UI, then shadow.
 if not prompt and st.session_state.pop("_post_reply_second_remount", None):
@@ -8703,8 +8717,8 @@ if prompt:
         if not already_stored:
             # Do NOT draw into chat_container here — history already rendered above.
             # Extra st.chat_message calls create the mobile "dual dialog" until restart.
-            if not st.session_state.ai_response_generated_for_current_turn:
-                st.session_state.messages.append({"role": "user", "content": prompt})
+        if not st.session_state.ai_response_generated_for_current_turn:
+            st.session_state.messages.append({"role": "user", "content": prompt})
         st.session_state.req_count += 1
 
         mem_depth = st.session_state.get('memory_depth_val', 3)
@@ -8818,7 +8832,7 @@ if prompt:
                     for m in history_to_send
                 ]
                 chat.append({"role": "user", "parts": [{"text": final_prompt}]})
-
+    
                 current_temp_val = st.session_state.get('temp_val', 0.7)
                 current_top_p_val = st.session_state.get('top_p_val', 0.9)
                 try:
@@ -8842,7 +8856,7 @@ if prompt:
 
                     st.session_state["harvest_in_progress"] = False
                     st.session_state.ai_response_generated_for_current_turn = True
-
+    
                 except Exception as e:
                     err_msg = str(e)
                     error_detail = f"Error during AI send_message: {err_msg}"
@@ -8866,7 +8880,7 @@ if prompt:
                         clean_text = ""
                         print("WARNING: response.text was None, defaulting to empty string.")
                     print(f"DEBUG: Current model response length: {len(clean_text)}")
-
+        
                     scrub_patterns = [
                         r"^\s*\n*",
                         r"✅ Approve\n",
@@ -8876,7 +8890,7 @@ if prompt:
                     for p in scrub_patterns:
                         clean_text = re.sub(p, "", clean_text, flags=re.DOTALL)
                     final_text = clean_text.strip()
-
+        
                     assimilation_marker_match = re.search(
                         r'\*\(✅ (.*?) assimilated into Master Record\)\*', final_text
                     )
@@ -8912,7 +8926,7 @@ if prompt:
                     st.session_state.pop("_chat_submit_this_run", None)
                     clear_pending_turn()
                     print(f"DEBUG: Appending model response. Current messages length: {len(st.session_state.messages)}")
-
+        
                     universal_save_state_dict = {}
                     for core_key in CORE_SCHEMA.values():
                         universal_save_state_dict[core_key] = st.session_state.get(core_key, '')
@@ -8945,12 +8959,12 @@ if prompt:
                         "🕵️ Auto-shadow will run after the UI settles.",
                     ])
                     request_chat_autoscroll()
-
-        except Exception as e:
+        
+                        except Exception as e:
             st.session_state.chat_send_error = str(e)
             set_shadow_debug_logs([f"System Crash: {e}"])
-
-    except Exception as e:
+        
+        except Exception as e:
         err_msg = str(e)
         if "429" in err_msg or "ResourceExhausted" in err_msg:
             set_shadow_debug_logs(["🚦 429 Quota Hit - Skipping Shadow."])
@@ -8961,7 +8975,7 @@ if prompt:
             print(f"ERROR: {error_detail}")
             st.session_state.chat_send_error = "An unexpected error occurred. Please try again."
 
-if should_rerun:
+    if should_rerun:
     request_chat_autoscroll()
     # Strategic remount after a completed turn — clears pale ghost shells on mobile.
-    st.rerun()
+        st.rerun()
