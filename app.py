@@ -36,6 +36,15 @@ from project_transfer import (
     CloudSyncError,
     DEFAULT_CLOUD_URL,
 )
+from vitality_kernels import (
+    KERNEL_SLOTS,
+    FOOTPRINT_SLOT,
+    READING_OUTPUT_SLOTS,
+    KERNEL_SLOT_FILES,
+    KERNEL_DESCRIPTIONS,
+    DEFAULT_KERNEL_SEEDS,
+    format_kernel_block,
+)
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from fpdf import FPDF
@@ -132,6 +141,49 @@ def apply_gatewai_seed_si_identity():
         print(f"ERROR seeding SI_Identity: {e}")
 
 apply_gatewai_seed_si_identity()
+
+
+def apply_gatewai_seed_vitality_kernels():
+    """Seed KR_* global slots once when empty (editable prototype kernels)."""
+    marker = os.path.join(BASE_SYSTEM_DIR, ".vitality_kernels_seeded")
+    try:
+        sys_db = db.get_system_db_path(BASE_SYSTEM_DIR)
+        db.init_db(sys_db)
+        db.migrate_db(sys_db)
+        existing = db.load_all_slots(None, sys_db, None) or {}
+        seeded_any = False
+        for slot_name in KERNEL_SLOTS:
+            current = ""
+            if slot_name in existing:
+                current = (existing[slot_name].get("content") or "").strip()
+            if current:
+                continue
+            seed = DEFAULT_KERNEL_SEEDS.get(slot_name, "")
+            if not str(seed).strip():
+                continue
+            db.save_slot(
+                "",
+                sys_db,
+                slot_name,
+                seed,
+                "core",
+                KERNEL_DESCRIPTIONS.get(slot_name, "Vitality kernel"),
+                "global",
+                "system",
+                False,
+                False,
+                False,
+            )
+            seeded_any = True
+            print(f"DEBUG: Seeded {slot_name} ({len(seed)} chars)")
+        if seeded_any or not os.path.exists(marker):
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(datetime.now().isoformat(timespec="seconds") + "\n")
+    except Exception as e:
+        print(f"ERROR seeding vitality kernels: {e}")
+
+
+apply_gatewai_seed_vitality_kernels()
 
 # Cloud gate: when GATEWAI_PASSWORD is set (Render), require unlock.
 # Desktop without the env var stays open.
@@ -1258,17 +1310,27 @@ CORE_SCHEMA = {
     "assumptions.txt": "MC_Assumptions",
     "blindspots.txt": "MC_Blindspots",
     "focus.txt": "MC_Focus", # <--- ADD THIS NEW LINE
+    "dimensional_footprint.txt": FOOTPRINT_SLOT,
     # SI (System Identity)
     "identity.txt": "SI_Identity",              # <-- SYSTEM BRAIN (Always Active)
     "profile.txt": "SI_User_Profile",          # <-- CONSCIOUS (User Edits this)
     "profile_shadow.txt": "SI_Observed_Profile", # <-- SUBCONSCIOUS (AI Edits this)
-    "reference_frontier.txt": "SI_Reference_Frontier" # <--- ADD THIS NEW LINE
+    "reference_frontier.txt": "SI_Reference_Frontier", # <--- ADD THIS NEW LINE
+    # KR (Vitality kernels — editable prototype shape; Shadow never writes)
+    "kr_diag.txt": "KR_diag",
+    "kr_reflx.txt": "KR_reflx",
+    "kr_boundary.txt": "KR_boundary",
 }
+# Keep KERNEL_SLOT_FILES in sync with CORE_SCHEMA kernel entries.
+assert set(KERNEL_SLOT_FILES.values()) <= set(CORE_SCHEMA.values())
 
 # --- NEW GLOBAL DEFINITION ---
 GLOBAL_CORE = list(TRANSFER_GLOBAL_CORE)
-# SI_Identity seed runs before the password gate (see apply_gatewai_seed_si_identity above).
+# SI_Identity + KR_* seeds run before the password gate.
 # --- END NEW GLOBAL DEFINITION ---
+SHADOW_READONLY_SLOTS = frozenset(
+    {"SI_Identity", "SI_User_Profile", *KERNEL_SLOTS}
+)
 
 def normalize_folder_name(folder):
     """Optional single-level folder label for user slots. Empty string = Ungrouped/root."""
@@ -1676,6 +1738,60 @@ def render_memory_slot_sidebar(key_prefix, height=480, show_meta=True):
             st.caption("AI-managed draft")
 
 
+def _record_reading_response(slot_name, note):
+    """Append a respond/suppress note for reflexive readings (live across Shadow passes)."""
+    if "reading_suppressions" not in st.session_state:
+        st.session_state.reading_suppressions = {}
+    bucket = st.session_state.reading_suppressions.setdefault(slot_name, [])
+    stamp = datetime.now().isoformat(timespec="seconds")
+    bucket.append(f"[{stamp}] {note}")
+    st.session_state.reading_suppressions[slot_name] = bucket[-24:]
+    write_reading_suppressions(
+        st.session_state.get("active_project"),
+        st.session_state.reading_suppressions,
+    )
+
+
+def _commit_staged_slot(slot_name, new_content_str):
+    commit_slot_text(slot_name, new_content_str, replaced_text=st.session_state.get(slot_name, ""))
+    del st.session_state.pending_updates[slot_name]
+    metadata_key = f"__metadata_{slot_name}"
+    if metadata_key in st.session_state.pending_updates:
+        meta_updates = st.session_state.pending_updates[metadata_key]
+        if slot_name in st.session_state.loaded_slots_metadata and isinstance(meta_updates, dict):
+            st.session_state.loaded_slots_metadata[slot_name].update(meta_updates)
+        del st.session_state.pending_updates[metadata_key]
+    save_state_dict = {}
+    for core_key in CORE_SCHEMA.values():
+        save_state_dict[core_key] = st.session_state.get(core_key, "")
+    if "loaded_slots_metadata" in st.session_state:
+        save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
+        for user_key in st.session_state.loaded_slots_metadata.keys():
+            if user_key not in CORE_SCHEMA.values():
+                save_state_dict[user_key] = st.session_state.get(user_key, "")
+    save_state_dict["messages"] = st.session_state.messages
+    config_keys = [
+        "chat_engine_set", "ingest_engine_set", "harvest_engine_set",
+        "shadow_engine_set", "transcribe_engine_set", "selected_lens_name",
+        "temp_val", "top_p_val", "memory_depth_val", "compaction_threshold",
+        "last_harvest_message_index", "review_mode_active", "auto_shadow_active",
+    ]
+    for key in config_keys:
+        save_state_dict[key] = st.session_state.get(key)
+    save_project_state(save_state_dict, st.session_state.active_project, silent=True)
+    if st.session_state.get("open_staged_proposal") == slot_name:
+        st.session_state.open_staged_proposal = None
+
+
+def _drop_staged_slot(slot_name):
+    del st.session_state.pending_updates[slot_name]
+    metadata_key = f"__metadata_{slot_name}"
+    if metadata_key in st.session_state.pending_updates:
+        del st.session_state.pending_updates[metadata_key]
+    if st.session_state.get("open_staged_proposal") == slot_name:
+        st.session_state.open_staged_proposal = None
+
+
 def render_staging_area():
     """Review pending Shadow/Harvest proposals inside the GateWai tab (not above it).
 
@@ -1684,6 +1800,8 @@ def render_staging_area():
     """
     if "pending_updates" not in st.session_state or not st.session_state.pending_updates:
         return
+    if "reading_suppressions" not in st.session_state:
+        st.session_state.reading_suppressions = {}
 
     st.divider()
     with st.container(border=True):
@@ -1708,6 +1826,7 @@ def render_staging_area():
             if str(slot_name).startswith("__metadata_"):
                 continue
 
+            is_reading_output = slot_name in READING_OUTPUT_SLOTS
             warning_icon = "🚩 " if is_suspect_staged else ""
             if st.session_state.get("open_staged_proposal") != slot_name:
                 if st.button(
@@ -1721,6 +1840,11 @@ def render_staging_area():
 
             with st.container(border=True):
                 st.markdown(f"**{warning_icon}{slot_name}**")
+                if is_reading_output:
+                    st.caption(
+                        "Proposed reading — respond with a reason, or approve. "
+                        "Reject without a reason is recorded as suppression (not a deletion of the live reading)."
+                    )
                 if st.button("Close", key=f"close_proposal_{slot_name}"):
                     st.session_state.open_staged_proposal = None
                     st.rerun()
@@ -1754,46 +1878,50 @@ def render_staging_area():
 
                 b_col1, b_col2, b_col3 = st.columns([1, 1, 2] if narrow else [1, 1, 3])
                 if b_col1.button("✅ APPROVE", key=f"accept_{slot_name}", type="primary", use_container_width=True):
-                    commit_slot_text(slot_name, new_content_str, replaced_text=st.session_state.get(slot_name, ""))
-                    del st.session_state.pending_updates[slot_name]
-                    metadata_key = f"__metadata_{slot_name}"
-                    if metadata_key in st.session_state.pending_updates:
-                        meta_updates = st.session_state.pending_updates[metadata_key]
-                        if slot_name in st.session_state.loaded_slots_metadata and isinstance(meta_updates, dict):
-                            st.session_state.loaded_slots_metadata[slot_name].update(meta_updates)
-                        del st.session_state.pending_updates[metadata_key]
-                    save_state_dict = {}
-                    for core_key in CORE_SCHEMA.values():
-                        save_state_dict[core_key] = st.session_state.get(core_key, "")
-                    if "loaded_slots_metadata" in st.session_state:
-                        save_state_dict["loaded_slots_metadata"] = st.session_state.loaded_slots_metadata
-                        for user_key in st.session_state.loaded_slots_metadata.keys():
-                            if user_key not in CORE_SCHEMA.values():
-                                save_state_dict[user_key] = st.session_state.get(user_key, "")
-                    save_state_dict["messages"] = st.session_state.messages
-                    config_keys = [
-                        "chat_engine_set", "ingest_engine_set", "harvest_engine_set",
-                        "shadow_engine_set", "transcribe_engine_set", "selected_lens_name",
-                        "temp_val", "top_p_val", "memory_depth_val", "compaction_threshold",
-                        "last_harvest_message_index", "review_mode_active", "auto_shadow_active",
-                    ]
-                    for key in config_keys:
-                        save_state_dict[key] = st.session_state.get(key)
-                    save_project_state(save_state_dict, st.session_state.active_project, silent=True)
-                    if st.session_state.get("open_staged_proposal") == slot_name:
-                        st.session_state.open_staged_proposal = None
+                    _commit_staged_slot(slot_name, new_content_str)
                     st.toast(f"✅ Committed '{slot_name}' to database.")
                     st.rerun()
 
-                if b_col2.button("❌ REJECT", key=f"reject_{slot_name}", use_container_width=True):
-                    del st.session_state.pending_updates[slot_name]
-                    metadata_key = f"__metadata_{slot_name}"
-                    if metadata_key in st.session_state.pending_updates:
-                        del st.session_state.pending_updates[metadata_key]
-                    if st.session_state.get("open_staged_proposal") == slot_name:
-                        st.session_state.open_staged_proposal = None
-                    st.toast(f"❌ Rejected update to {slot_name}")
-                    st.rerun()
+                if is_reading_output:
+                    if b_col2.button(
+                        "🚫 Suppress",
+                        key=f"suppress_{slot_name}",
+                        use_container_width=True,
+                        help="Reject without a reason — logged as suppression for the next Shadow pass.",
+                    ):
+                        _record_reading_response(
+                            slot_name,
+                            "SUPPRESSION: rejected without reason.",
+                        )
+                        _drop_staged_slot(slot_name)
+                        persist_pending_updates_now()
+                        st.toast(f"Suppression recorded for {slot_name} (proposal dropped; reading stays live).")
+                        st.rerun()
+                    response_text = st.text_area(
+                        "Respond to this reading (required to answer without approving)",
+                        key=f"reading_response_{slot_name}",
+                        height=80,
+                        placeholder="Counter-reading / reason — e.g. why a dimension does not apply.",
+                    )
+                    if st.button(
+                        "✍️ Respond (keep live)",
+                        key=f"respond_{slot_name}",
+                        use_container_width=True,
+                    ):
+                        reason = (response_text or "").strip()
+                        if not reason:
+                            st.warning("Add a reason — a response is a reading, not a deletion.")
+                        else:
+                            _record_reading_response(slot_name, f"RESPONSE: {reason}")
+                            _drop_staged_slot(slot_name)
+                            persist_pending_updates_now()
+                            st.toast(f"Response recorded for {slot_name}. Next Shadow pass will see it.")
+                            st.rerun()
+                else:
+                    if b_col2.button("❌ REJECT", key=f"reject_{slot_name}", use_container_width=True):
+                        _drop_staged_slot(slot_name)
+                        st.toast(f"❌ Rejected update to {slot_name}")
+                        st.rerun()
 
         primary_count = sum(
             1 for k in st.session_state.get("pending_updates", {})
@@ -1811,7 +1939,7 @@ def render_staging_area():
                 use_container_width=True,
                 key="reject_all_proposals_btn",
                 disabled=buttons_disabled,
-                help="Reject all pending proposals in the Staging Area.",
+                help="Reject all pending proposals in the Staging Area. Reading outputs are logged as suppressions.",
             ):
                 if "pending_updates" in st.session_state:
                     primary_slot_names_to_delete = [
@@ -1819,6 +1947,11 @@ def render_staging_area():
                         if not key.startswith("__metadata_")
                     ]
                     for slot_name in primary_slot_names_to_delete:
+                        if slot_name in READING_OUTPUT_SLOTS:
+                            _record_reading_response(
+                                slot_name,
+                                "SUPPRESSION: rejected without reason (Reject All).",
+                            )
                         st.session_state.pending_updates.pop(slot_name, None)
                         st.session_state.pending_updates.pop(f"__metadata_{slot_name}", None)
                 st.session_state.open_staged_proposal = None
@@ -2193,7 +2326,7 @@ def load_project_state(name):
                 "slot_name": core_key,
                 "content": state.get(core_key, ""),
                 "slot_type": "core",
-                "description": "System Core File",
+                "description": KERNEL_DESCRIPTIONS.get(core_key, "System Core File"),
                 "scope": "global" if core_key in GLOBAL_CORE else "project",
                 "owner_id": "system",
                 "is_distributed": False,
@@ -2205,6 +2338,10 @@ def load_project_state(name):
         else:
             # Normalize folder for existing slots (missing => root/ungrouped)
             full_slots[core_key]["folder"] = ""
+            if core_key in KERNEL_DESCRIPTIONS and not (full_slots[core_key].get("description") or "").strip():
+                full_slots[core_key]["description"] = KERNEL_DESCRIPTIONS[core_key]
+            if core_key == FOOTPRINT_SLOT and not (full_slots[core_key].get("description") or "").strip():
+                full_slots[core_key]["description"] = KERNEL_DESCRIPTIONS[FOOTPRINT_SLOT]
 
     # Normalize folder labels on all loaded slots
     for k, meta in full_slots.items():
@@ -2264,6 +2401,41 @@ def persist_pending_updates_now():
         )
     except Exception:
         st.session_state._pending_updates_snapshot = ""
+    write_reading_suppressions(project, st.session_state.get("reading_suppressions") or {})
+
+
+def reading_suppressions_path(name):
+    return os.path.join(BASE_PROJECT_DIR, name, "reading_suppressions.json")
+
+
+def read_reading_suppressions(name):
+    path = reading_suppressions_path(name)
+    if not name or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_reading_suppressions(name, data):
+    if not name:
+        return
+    path = reading_suppressions_path(name)
+    data = data if isinstance(data, dict) else {}
+    try:
+        if not data:
+            if os.path.exists(path):
+                os.remove(path)
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        print(f"ERROR: write_reading_suppressions failed for {name}: {e}")
 
 ENGINE_ROOM_FIELDS = (
     ("chat_engine_set", "chat_engine"),
@@ -4061,10 +4233,11 @@ def report_harvest_error(title, message, context=None):
 HARVEST_CORE_SLOTS = [
     "MI_Master_Record", "MC_Frontier", "MI_Project_Status",
     "MC_Blindspots", "MC_Assumptions", "SI_Observed_Profile", "MC_Focus",
+    FOOTPRINT_SLOT,
 ]
 HARVEST_SMALL_SLOTS = [
     "MC_Frontier", "MI_Project_Status", "MC_Blindspots",
-    "MC_Assumptions", "SI_Observed_Profile", "MC_Focus",
+    "MC_Assumptions", "SI_Observed_Profile", "MC_Focus", FOOTPRINT_SLOT,
 ]
 HARVEST_SLOT_CHARTERS = {
     "MC_Focus": (
@@ -4088,8 +4261,12 @@ HARVEST_SLOT_CHARTERS = {
         "NOT open questions (Frontier), NOT next steps (Focus)."
     ),
     "SI_Observed_Profile": (
-        "Observed user behavioral patterns and preferences. "
-        "NOT project facts, NOT task lists, NOT Frontier risks."
+        "Shadow reading of the reader across vitality dimensions that are legible from the workspace. "
+        "Proposed reading — not a wellness score, not project facts, not task lists."
+    ),
+    FOOTPRINT_SLOT: (
+        "Which of the eight vitality dimensions this project actually touches. "
+        "Name the subset; name what cannot be seen. NOT a user wellness score."
     ),
     "MI_Master_Record": (
         "Durable project facts, decisions, evidence, and resolved conclusions. "
@@ -4210,8 +4387,16 @@ SHADOW_SLOT_JOBS = {
         "Identify unproven premises actually being relied upon and update this file. Do not invent."
     ),
     "SI_Observed_Profile": (
-        "Identify new behavioral patterns and preferences. "
-        "Add new bullets or modify existing ones. Log habits, not project facts."
+        "Produce a shadow reading of the reader from this interaction and prior material. "
+        "Read across the eight vitality dimensions; report what is legible; name what cannot be seen. "
+        "Name where the primary reading would compound the reader's condition. "
+        "No scores, no metrics, no wellness grade. Habits may appear as evidence, not as the whole file. "
+        "Preserve prior still-true observations; mark stale ones clearly."
+    ),
+    FOOTPRINT_SLOT: (
+        "Propose which of the eight vitality dimensions this project actually touches. "
+        "Name the subset; name dimensions the workspace cannot see. "
+        "This is a project footprint reading, not a user wellness score. Keep it short."
     ),
 }
 
@@ -4256,6 +4441,18 @@ def shadow_update_instructions(target, loaded_metadata, current_state, is_distri
                 "Append new findings under ## Compact-Context Analysis. "
                 "Do not modify ## Full-Context Analysis.\n"
             )
+    elif target in ("SI_Observed_Profile", FOOTPRINT_SLOT):
+        reflx = (current_state.get("KR_reflx") or "").strip()
+        if reflx:
+            extra += format_kernel_block("KR_reflx", reflx)
+        suppressions = st.session_state.get("reading_suppressions") or {}
+        notes = suppressions.get(target) or []
+        if notes:
+            extra += (
+                "SUPPRESSION / RESPONSE HISTORY (name patterns if they recur):\n"
+                + "\n".join(f"- {n}" for n in notes[-8:])
+                + "\n"
+            )
     elif target in loaded_metadata and loaded_metadata[target].get("slot_type") == "user":
         extra = (
             f"Integrate new details from THIS interaction into '{target}'. "
@@ -4266,7 +4463,7 @@ def shadow_update_instructions(target, loaded_metadata, current_state, is_distri
         "Integrate new relevant details from the interaction.",
     )
     stay_out = ""
-    if target in ("MC_Focus", "MC_Frontier"):
+    if target in ("MC_Focus", "MC_Frontier", FOOTPRINT_SLOT):
         stay_out = (
             f"PURPOSE: {shadow_slot_charter(target, loaded_metadata)}\n"
             "Only include material that belongs in this slot. "
@@ -5040,19 +5237,24 @@ def run_shadow_dispatcher(history_list, current_state, loaded_metadata, domain_c
     # PROTECTION:
     # 1. Exclude SI_Identity (System Brain).
     # 2. Exclude SI_User_Profile (User's Manual Bio - READ ONLY for Shadow).
-    # 3. Allow SI_Observed_Profile (AI's Observations - WRITE ONLY for Shadow).
+    # 3. Exclude KR_* vitality kernels (user-edited shape — READ ONLY for Shadow).
+    # 4. Allow SI_Observed_Profile + MC_Dimensional_Footprint (reflexive outputs).
     # --- CRITICAL FIX: Shadow's targets are strictly limited to metacognitive slots ---
     METAPROPOSAL_TARGETS = [
         "MI_Project_Status",
         "MC_Focus",
         "SI_Observed_Profile",
+        FOOTPRINT_SLOT,
         "MC_Blindspots",
         "MC_Assumptions",
-        "MC_Frontier"
+        "MC_Frontier",
     ]
     # System slots, plus existing AI-managed user files. Never invent a user file.
     # Uploaded sources stay out unless they are marked AI-managed.
-    valid_targets = [k for k in available_slots if k in METAPROPOSAL_TARGETS]
+    valid_targets = [
+        k for k in available_slots
+        if k in METAPROPOSAL_TARGETS and k not in SHADOW_READONLY_SLOTS
+    ]
     user_target_lines = []
     for slot_name, meta in loaded_metadata.items():
         if meta.get('slot_type') == 'user' and meta.get('ai_managed', False):
@@ -5088,14 +5290,16 @@ def run_shadow_dispatcher(history_list, current_state, loaded_metadata, domain_c
             "1. AI-MANAGED USER FILES: Include one when this interaction adds or revises material that belongs in that file, using its name and description. The user does not have to say the filename. Do NOT include a file just because it exists or the topic is only loosely related. NEVER invent a filename. Only names from the list above are allowed.\n"
             "2. IF WORKFLOW CHANGE -> [MI_Project_Status]\n"
             "3. IF IMMEDIATE FOCUS/NEXT STEPS/QUESTIONS -> [MC_Focus]\n"
-            "4. IF USER PREFERENCE/HABIT -> [SI_Observed_Profile] (e.g. 'User hates prose summaries')\n"
-            "5. IF LOGIC GAP -> [MC_Blindspots] (What are we ignoring?)\n"
-            "6. IF UNSTATED PREMISE -> [MC_Assumptions] (What are we taking for granted?)\n"
-            "7. IF ACTIVE RISKS, STRATEGIC UNKNOWNS, OR KEY OPEN QUESTIONS -> [MC_Frontier]\n\n"
+            "4. IF READER STATE / HABIT / CONDITION LEGIBLE FROM THE TURN -> [SI_Observed_Profile]\n"
+            "5. IF THE PROJECT'S DIMENSIONAL FOOTPRINT SHOULD BE REVISED -> [MC_Dimensional_Footprint]\n"
+            "6. IF LOGIC GAP -> [MC_Blindspots] (What are we ignoring?)\n"
+            "7. IF UNSTATED PREMISE -> [MC_Assumptions] (What are we taking for granted?)\n"
+            "8. IF ACTIVE RISKS, STRATEGIC UNKNOWNS, OR KEY OPEN QUESTIONS -> [MC_Frontier]\n\n"
             "CRITICAL CONSTRAINTS:\n"
             "- MULTI-SLOT OK: If an event touches several files, list them.\n"
             "- Next steps and immediate questions go to MC_Focus, not MC_Frontier.\n"
             "- Strategic risks and long-open unknowns go to MC_Frontier, not MC_Focus.\n"
+            "- NEVER route to KR_diag, KR_reflx, KR_boundary, SI_Identity, or SI_User_Profile.\n"
             "- FORMAT: OUTPUT ONLY A JSON LIST.\n"
             "DECISION (Example: [\"MI_Project_Status\", \"MC_Focus\", \"MC_Blindspots\"]):"
         )
@@ -5123,6 +5327,7 @@ def run_shadow_dispatcher(history_list, current_state, loaded_metadata, domain_c
                 resolved = resolve_shadow_target(raw_name, valid_targets)
                 if resolved and resolved not in targets:
                     targets.append(resolved)
+            targets = [t for t in targets if t not in SHADOW_READONLY_SLOTS]
             if len(targets) < len(raw_targets):
                 logs.append(f"⚠️ Shadow: Filtered out invalid target(s) from triage output. Original: {raw_targets}, Filtered: {targets}")
             if not targets:
@@ -5452,6 +5657,7 @@ if st.session_state.loaded_project != st.session_state.active_project:
     # the previous project's pointer after a switch.
     st.session_state.pop("harvest_pointer_input", None)
     st.session_state.pending_updates = read_pending_updates(st.session_state.active_project)
+    st.session_state.reading_suppressions = read_reading_suppressions(st.session_state.active_project)
     try:
         st.session_state._pending_updates_snapshot = json.dumps(
             st.session_state.pending_updates, sort_keys=True, default=str
@@ -5956,6 +6162,7 @@ with st.expander("📂 Project Manager", expanded=False):
 #print("DEBUG: About to start sidebar.") # <-- ADD THIS LINE
 
 with st.sidebar:
+    st.caption("GateWai produces structural readings, not verdicts — and names what it cannot see.")
     st.subheader("🔑 API Keys")
     user_input_key = st.text_input(
         "Gemini API Key:",
@@ -7605,6 +7812,9 @@ with st.sidebar:
             # Build context for the help AI
             # Include MI_Master_Record, MC_Focus, SI_Identity, SI_User_Profile, SI_Observed_Profile
             help_context = ""
+            help_kernel = format_kernel_block("KR_diag", st.session_state.get("KR_diag", ""))
+            if help_kernel:
+                help_context += help_kernel
             help_context += f"--- MI_Master_Record (Project Overview) ---\n{st.session_state.get('MI_Master_Record', 'No project overview available.')}\n\n"
             help_context += f"--- MC_Focus (Current Project Focus) ---\n{st.session_state.get('MC_Focus', 'No immediate project focus defined.')}\n\n"
             help_context += f"--- SI_Identity (Gatewai's Core Identity) ---\n{st.session_state.get('SI_Identity', 'Gatewai is a Cognitive IDE. User as Executive; AI as Proposer.')}\n\n"
@@ -7618,7 +7828,8 @@ with st.sidebar:
                 "the user's project, and the user's profiles to tailor your answers. "
                 "Focus strictly on explaining Gatewai's features, workflow, and troubleshooting. "
                 "Do NOT engage in project-specific tasks or act as a co-pilot for the user's project. "
-                "Your responses should be helpful and instructional. Do not output internal reasoning."
+                "Your responses should be helpful and instructional. Do not output internal reasoning. "
+                "If KR_diag is present, keep help answers as readings about Gatewai itself — not product recommendations dressed as facts."
             )
 
             # Prepare history for the help AI (only the help chat history)
@@ -8527,10 +8738,16 @@ if prompt:
             for key, slot_name in CORE_SCHEMA.items():
                 if slot_name in ["MI_Master_Record", "MI_Master_Record_Summary"]:
                     continue
+                # KR_* are shape — injected above Domain Lens, not as material.
+                if slot_name in KERNEL_SLOTS:
+                    continue
                 val = st.session_state.get(slot_name, "")
                 if val:
                     memory_block += f"\n{val}\n\n"
-                    manifest_rows.append(f"| {slot_name:<20} | CORE    | System Source of Truth |")
+                    desc = KERNEL_DESCRIPTIONS.get(slot_name, "System Source of Truth")
+                    if slot_name == FOOTPRINT_SLOT:
+                        desc = "Project dimensional footprint"
+                    manifest_rows.append(f"| {slot_name:<20} | CORE    | {desc[:28]} |")
                     context_files.append(slot_name)
 
             if "loaded_slots_metadata" in st.session_state:
@@ -8563,17 +8780,28 @@ if prompt:
                 + "\n".join(manifest_rows) + "\n"
             )
 
+            kernel_prefix = ""
+            kr_diag = format_kernel_block("KR_diag", st.session_state.get("KR_diag", ""))
+            if kr_diag:
+                kernel_prefix += kr_diag
+            kr_boundary = format_kernel_block("KR_boundary", st.session_state.get("KR_boundary", ""))
+            # Stub is seeded with a header; only inject when it looks active (no stub title-only).
+            if kr_boundary and "Leave empty until the boundary discipline is ready" not in kr_boundary:
+                kernel_prefix += kr_boundary
+
             sys_instr = (
+                f"{kernel_prefix}"
                 f"--- DOMAIN LENS ({st.session_state.selected_lens_name}) ---\n{st.session_state.domain_content}\n\n"
                 f"{manifest_table}\n"
                 f"\n{memory_block}\n"
                 f"--- DATA STREAM ---\n{injected_data}\n\n"
                 "INSTRUCTIONS:\n"
                 "1. USE THE MANIFEST to understand the purpose of each file.\n"
-                "2. 'SYSTEM CORE' files are your brain.\n"
+                "2. 'SYSTEM CORE' files are your brain. KR_* blocks above are shape (discipline), not project facts.\n"
                 "3. 'USER FILES' are attachments. Read/Write/Delete them as requested.\n"
                 "4. CRITICAL NEGATIVE CONSTRAINT: You are a conversational Co-Pilot. You MUST NOT propose any memory slot updates, output JSON for system changes, or attempt to directly modify the system state in your responses. All system updates are handled by other engines and the Staging Area.\n"
                 "5. OUTPUT RULE: Do not output internal reasoning or 'scratchpad' thoughts. Respond DIRECTLY to the user.\n"
+                "6. When KR_diag is present: produce a reading (fact, cost bearer, gauge, falsifier — or name which you cannot fill from the workspace). Do not recommend; the settlement belongs to the party who bears the cost.\n"
             )
 
             final_prompt = prompt

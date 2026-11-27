@@ -21,7 +21,14 @@ import database as db
 PROJECT_ZIP_WARN_BYTES = 500 * 1024 * 1024
 PROJECT_ZIP_MAX_BYTES = 1024 * 1024 * 1024
 SYSTEM_GLOBALS_EXPORT = "system_globals.json"
-GLOBAL_CORE = ["SI_Identity", "SI_User_Profile", "SI_Observed_Profile"]
+GLOBAL_CORE = [
+    "SI_Identity",
+    "SI_User_Profile",
+    "SI_Observed_Profile",
+    "KR_diag",
+    "KR_reflx",
+    "KR_boundary",
+]
 DEFAULT_CLOUD_URL = "https://gatewai-u1ww.onrender.com"
 
 
